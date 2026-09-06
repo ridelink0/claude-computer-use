@@ -31,6 +31,9 @@ const BLOCKED = [
   'claude', 'chatgpt', 'codex',
   // Authenticators and wallets: one-time codes and seed phrases, in plain text.
   'authenticator', 'authy', 'winauth', 'ledger', 'exodus', 'electrum', 'trezor',
+  // macOS: the login window, the authorisation prompt, the keychain and
+  // Apple's password manager. The same rule as the Windows names above.
+  'loginwindow', 'securityagent', 'keychain access', 'passwords', 'screensaverengine',
 ];
 
 // The lock screen and the logon UI, when either owns a visible window, mean the
@@ -75,6 +78,17 @@ const SENSITIVE = {
   'parsec':          'A remote desktop client relays every click and keystroke to another machine.',
   'vncviewer':       'A remote desktop client relays every click and keystroke to another machine.',
   'tvnviewer':       'A remote desktop client relays every click and keystroke to another machine.',
+  // macOS process names for the same categories.
+  'finder':          'Finder can move, rename, and delete any file you can.',
+  'system settings': 'System Settings changes machine-wide configuration.',
+  'system preferences': 'System Preferences changes machine-wide configuration.',
+  'safari':          'A browser carries every session you are signed in to.',
+  'google chrome':   'A browser carries every session you are signed in to.',
+  'microsoft edge':  'A browser carries every session you are signed in to.',
+  'brave browser':   'A browser carries every session you are signed in to.',
+  'mail':            'An email client can read and send mail as you.',
+  'messages':        'A messaging app can send messages as you.',
+  'screen sharing':  'A remote desktop client relays every click and keystroke to another machine.',
 };
 
 // Shell-equivalent surfaces. Anything typed into these runs as you, so Computer Use
@@ -87,6 +101,8 @@ const SHELL_APPS = [
   'code', 'code - insiders', 'codium', 'devenv', 'idea64', 'pycharm64',
   'webstorm64', 'rider64', 'clion64', 'goland64', 'phpstorm64', 'rubymine64',
   'sublime_text', 'atom', 'cursor', 'windsurf', 'zed',
+  // macOS terminals and editors.
+  'terminal', 'iterm2', 'iterm', 'warp', 'ghostty', 'visual studio code', 'xcode',
 ];
 
 // Interpreters, which host both consoles and ordinary GUI windows. Process
@@ -111,6 +127,8 @@ function normalise(name) {
   if (!name) return '';
   let n = String(name).toLowerCase();
   if (n.endsWith('.exe')) n = n.slice(0, -4);
+  // macOS: the path basename is "Safari.app", the process name "Safari".
+  if (n.endsWith('.app')) n = n.slice(0, -4);
   return n;
 }
 

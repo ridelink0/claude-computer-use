@@ -326,6 +326,46 @@ command line by another door.
 `node tools/cli.mjs snapshot '{"title":"Notepad"}'` drives the server from a
 shell against your real windows and prints what each call cost.
 
+## What ChatGPT's computer use gained with GPT-6 Astra, and where it is here
+
+With GPT-6 Astra (September 2026) the ChatGPT desktop app's computer use
+gained, as its users see it: **Appshots** (both Command keys send the front
+window's picture and text, including text outside the visible area, into the
+chat), **Locked use** (a Mac keeps working after it locks), **Remote** (start,
+steer and approve from the phone), review pauses when the model may have
+misread an instruction, and on Windows a host that captures windows behind
+other windows, reads menus and popups, drags, and launches installed apps by
+name. 0.6.0 carries the Claude Code versions:
+
+- **Appshots.** Press **both Ctrl keys** while Computer Use is running and
+  the window in front is filed - its tree with off-screen text, plus a
+  picture. The text lands in front of Claude with your next prompt (a
+  UserPromptSubmit hook), and `computer_appshot` shows the picture. Off with
+  the "Appshot hotkey" setting.
+- **Menus and popups.** Context menus, dropdown lists and popups are listed
+  as `[menu]`, `[dropdown list]`, `[popup]` with their owning window, appear
+  as `New window:` on the action that opened them, and are read and clicked
+  by index like anything else.
+- **Windows behind windows.** A screenshot of a window that is partly covered
+  is the window rendering itself (PrintWindow with full content), not the
+  cover. The caption says when that happened, and when an app refused.
+- **Drag.** `computer_drag` and the `drag` step, for canvases, sliders,
+  handwriting and 3D viewports.
+- **Launch by name.** `computer_launch { app: "Spotify" }` resolves Start-menu
+  names, Store apps included; `computer_apps { installed: "spot" }` lists what
+  is installed.
+- **Remote.** Claude Code's Remote Control already drives this session from
+  a phone; the skill tells Claude what that changes (nobody at the keyboard,
+  Stop and Esc are for whoever is at the desk).
+- **Locked use** is not here: a locked Windows desktop is the secure
+  desktop, which UI Automation cannot reach, so it is refused
+  (`desktop_locked`) rather than attempted.
+- **macOS host, second pass.** Window handles no longer shift with window
+  order, Escape stops a run, right and double clicks and point clicks work,
+  key chords go to the named window or refuse, drag, clipboard, describe and
+  busy exist, screenshots capture the window itself, and typed newlines are
+  keys. Still uncompiled on a Mac; `node server/build.mjs --self-test` first.
+
 ## Notes across context windows, and what a turn ending means
 
 GPT-6 Astra's computer use (September 2026) added a few things worth having

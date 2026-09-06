@@ -86,6 +86,12 @@ namespace Axon
         // back, whatever else is going on.
         internal static Action OnPanic;
 
+        // Both Ctrl keys held together - the Windows counterpart of the
+        // ChatGPT desktop app's both-Command-keys appshot. Fires once per
+        // press; releasing either key re-arms it.
+        internal static Action OnAppshot;
+        static bool _lctrlDown, _rctrlDown, _appshotFired;
+
         // A freshly compiled, unsigned binary that installs global keyboard
         // hooks looks exactly like a keylogger, and Windows security tooling can
         // let the install succeed while quietly delivering nothing. So hooks
@@ -204,9 +210,20 @@ namespace Axon
                     // physical input is blocked: BlockInput stops input reaching
                     // other applications, but the thread that blocked it keeps
                     // seeing it, and that thread is this one.
-                    if (Marshal.ReadInt32(lParam, 0) == 0x1B && OnPanic != null)
+                    int vk = Marshal.ReadInt32(lParam, 0);
+                    if (vk == 0x1B && OnPanic != null)
                     {
                         try { OnPanic(); } catch { }
+                    }
+                    uint km = (uint)wParam;
+                    bool keyDown = km == 0x0100 || km == 0x0104;   // WM_KEYDOWN, WM_SYSKEYDOWN
+                    bool keyUp = km == 0x0101 || km == 0x0105;     // WM_KEYUP, WM_SYSKEYUP
+                    if (vk == 0xA2) { if (keyDown) _lctrlDown = true; else if (keyUp) { _lctrlDown = false; _appshotFired = false; } }
+                    if (vk == 0xA3) { if (keyDown) _rctrlDown = true; else if (keyUp) { _rctrlDown = false; _appshotFired = false; } }
+                    if (_lctrlDown && _rctrlDown && !_appshotFired && OnAppshot != null)
+                    {
+                        _appshotFired = true;
+                        try { OnAppshot(); } catch { }
                     }
                 }
             }

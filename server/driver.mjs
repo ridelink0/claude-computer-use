@@ -16,8 +16,9 @@ export class HostError extends Error {
 }
 
 export class Driver {
-  constructor({ timeoutMs = 30000, onLog = () => {}, env = null } = {}) {
+  constructor({ timeoutMs = 30000, onLog = () => {}, env = null, onEvent = null } = {}) {
     this.timeoutMs = timeoutMs;
+    this.onEvent = onEvent;
     this.onLog = onLog;
     // Extra environment for the host - which overlay slot this session owns, and
     // what to call it on screen when more than one Claude is running.
@@ -122,6 +123,13 @@ export class Driver {
     }
     if (msg.event === 'ready') {
       if (this.ready) this.ready(msg);
+      return;
+    }
+    // Anything else the host volunteers - an appshot hotkey, say - goes to
+    // the server's event handler and never touches the request queue.
+    if (msg.event) {
+      try { if (this.onEvent) this.onEvent(msg); }
+      catch (e) { this.onLog('event handler: ' + (e && e.message ? e.message : e)); }
       return;
     }
     const entry = this.pending.get(msg.id);

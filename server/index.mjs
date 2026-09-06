@@ -7,8 +7,10 @@
 
 import { createInterface } from 'node:readline';
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { Driver, HostError } from './driver.mjs';
+import { dataDir } from './build.mjs';
 import { Policy, classify, isConsequential, isHandOff, desktopLocked, TIER } from './policy.mjs';
 import { renderSnapshot, renderApps, buildRows, renderDelta, diffRows, subtreeNodes, findMatcher, nodeMatches, leanNodes, probeWarning } from './render.mjs';
 import { profileHint } from './profiles.mjs';
@@ -17,7 +19,7 @@ import { Tasks, validateSteps, HALT_TURN } from './tasks.mjs';
 import { Journal } from './journal.mjs';
 
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
-const SERVER_INFO = { name: 'computer-use', version: '0.5.0' };
+const SERVER_INFO = { name: 'computer-use', version: '0.6.0' };
 
 // Claude Code puts a server's instructions in front of the model at the start
 // of every session, before any tool schema has been loaded. For a deferred
@@ -48,6 +50,7 @@ const driver = new Driver({
     CU_SESSION_SLOT: String(sessions.slot),
     CU_SESSION_LABEL: sessions.label,
   },
+  onEvent: (m) => hostEvent(m),
 });
 const policy = new Policy();
 policy.markSelf([process.pid, process.ppid]);
@@ -79,7 +82,66 @@ function bannerStatus(s) {
   driver.call('banner', { text: t }, { timeoutMs: 2000 }).catch(() => {});
 }
 const appWord = (win) => String(win && win.process || '').replace(/\.exe$/i, '') || 'a window';
-const VERB = { click: 'clicking', type: 'typing', set_value: 'typing', key: 'pressing keys', scroll: 'scrolling' };
+const VERB = { click: 'clicking', type: 'typing', set_value: 'typing', key: 'pressing keys', scroll: 'scrolling', drag: 'dragging' };
+
+// Appshots. In the ChatGPT desktop app, both Command keys send the front
+// window - picture and text, including text outside the visible area - into
+// the chat. Here the host reports both Ctrl keys, the server reads that
+// window the way it reads anything (the tree carries off-screen text) plus a
+// picture, and files it in the plugin's data dir. The UserPromptSubmit hook
+// puts the text in front of Claude with the next prompt; computer_appshot
+// shows the picture too, or takes one on demand.
+const APPSHOT_DIR = path.join(dataDir(), 'appshots');
+const APPSHOTS_ENABLED = !/^(off|false|0|no)$/i.test(String(process.env.CU_APPSHOT || '').trim());
+let pendingAppshot = null;
+
+function hostEvent(msg) {
+  if (msg.event === 'appshot' && msg.hwnd && APPSHOTS_ENABLED) {
+    takeAppshot(Number(msg.hwnd), { announce: true })
+      .catch((e) => process.stderr.write('[computer-use] appshot: ' + (e && e.message ? e.message : e) + '\n'));
+  }
+}
+
+async function takeAppshot(hwnd, { announce = true } = {}) {
+  const win = await windowFor({ hwnd });
+  if (!win) throw new HostError('window_not_found', 'That window is gone.', null);
+  const check = policy.checkRead(win);
+  if (!check.ok) throw new HostError(check.code, check.message, check.hint);
+  if (DESKTOP_SCOPE === 'current' && win.other_desktop) throw new HostError('other_desktop', 'That window is on another virtual desktop.', null);
+  const snap = await handlers.computer_snapshot({ hwnd: Number(win.hwnd), full: true, text_limit: 4000 });
+  if (snap.isError) throw new HostError(snap.code || 'read_failed', bodyOf(snap), null);
+  const body = bodyOf(snap);
+  let image = null;
+  try {
+    const over = await blockedInFrame(win);
+    if (!over) {
+      const shot = await driver.call('screenshot', { hwnd: Number(win.hwnd), max_width: 1100, quality: 60 });
+      image = shot.result;
+      budget.shots++;
+      budget.shotBytes += image.bytes;
+    }
+  } catch { /* the text is the appshot; the picture is a bonus */ }
+  fs.mkdirSync(APPSHOT_DIR, { recursive: true });
+  const meta = {
+    t: Date.now(), hwnd: Number(win.hwnd), title: win.title || '', process: win.process || '',
+    chars: body.length, image: !!image, consumed: false,
+  };
+  const when = new Date(meta.t).toTimeString().slice(0, 5);
+  fs.writeFileSync(path.join(APPSHOT_DIR, 'latest.md'),
+    `Appshot of "${meta.title}" (${meta.process}, hwnd ${meta.hwnd}) taken ${when}:\n\n${body}\n`);
+  if (image) fs.writeFileSync(path.join(APPSHOT_DIR, 'latest.jpg'), Buffer.from(image.data, 'base64'));
+  else { try { fs.unlinkSync(path.join(APPSHOT_DIR, 'latest.jpg')); } catch { /* none */ } }
+  fs.writeFileSync(path.join(APPSHOT_DIR, 'latest.json'), JSON.stringify(meta));
+  journal.append({ kind: 'appshot', hwnd: meta.hwnd, title: meta.title, app: policy.key(win), summary: `${meta.chars} chars${image ? ' + image' : ''}` });
+  if (announce) pendingAppshot = meta;
+  return { meta, text: body, image };
+}
+
+function appshotContent(meta, body, image) {
+  const content = [{ type: 'text', text: body }];
+  if (image) content.push({ type: 'image', data: image.data, mimeType: image.mime || 'image/jpeg' });
+  return { content };
+}
 
 // Screenshots are the expensive path by roughly an order of magnitude. Track
 // them so the model can see what it is spending and prefer trees.
@@ -173,13 +235,13 @@ const TARGET = {
 const TOOLS = [
   {
     name: 'computer_apps',
-    description: 'List visible windows with handle, app, and safety tier. Start here.',
+    description: 'List visible windows with handle, app, and safety tier. Start here. Menus and popups appear as [menu]/[popup]. installed:"spot" also lists installed apps matching that ("*" for all) for computer_launch.',
     annotations: READ_ONLY,
-    inputSchema: { type: 'object', properties: { include_hidden: bool } },
+    inputSchema: { type: 'object', properties: { include_hidden: bool, installed: str } },
   },
   {
     name: 'computer_launch',
-    description: 'Start an app by name (notepad, calc, mspaint) or .exe path and wait for its window. Reading it needs nothing; acting still needs computer_grant.',
+    description: 'Start an app by name (notepad, spotify, "Visual Studio Code"), Start-menu name, or .exe path and wait for its window. Reading it needs nothing; acting still needs computer_grant.',
     inputSchema: { type: 'object', required: ['app'], properties: { app: str, args: str, timeout_ms: int } },
   },
   {
@@ -243,6 +305,20 @@ const TOOLS = [
     name: 'computer_scroll',
     description: 'Scroll an element or the cursor point. Negative is down. Scroll-then-read-then-click belongs in one computer_run call.',
     inputSchema: { type: 'object', properties: { ...TARGET, amount: int, horizontal: bool } },
+  },
+  {
+    name: 'computer_drag',
+    description: 'Press at from:[x,y], move, release at to:[x,y] (screen coordinates from with_rects:true). For canvases, sliders, handwriting, 3D viewports. Needs the window in front.',
+    inputSchema: { type: 'object', required: ['hwnd', 'from', 'to'], properties: {
+      hwnd: int, from: { type: 'array', items: int }, to: { type: 'array', items: int },
+      button: { type: 'string', enum: ['left', 'right', 'middle'] }, steps: int, hold_ms: int, mode: MODE,
+    } },
+  },
+  {
+    name: 'computer_appshot',
+    description: 'The latest appshot (the user pressed both Ctrl keys with a window in front): its text and picture. now:true captures the foreground window this instant instead.',
+    annotations: READ_ONLY,
+    inputSchema: { type: 'object', properties: { now: bool } },
   },
   {
     name: 'computer_wait_for',
@@ -475,6 +551,49 @@ function offDesktopCheck(win) {
     'Switch to that desktop, or set the plugin\'s "Virtual desktops Claude may work on" setting to "all".');
 }
 
+// Installed apps, from the Start menu, so "open Spotify" works when Spotify
+// is not running and is not on PATH - Codex's list_apps covers installed apps
+// the same way. Slow to ask (a PowerShell), so cached for a while.
+let startAppsCache = { at: 0, list: [] };
+
+async function startApps() {
+  if (process.platform !== 'win32') return [];
+  if (Date.now() - startAppsCache.at < 5 * 60_000 && startAppsCache.list.length) return startAppsCache.list;
+  const out = await new Promise((resolve) => {
+    let s = '';
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(s); } };
+    let p;
+    try {
+      p = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+        'Get-StartApps | Select-Object Name,AppID | ConvertTo-Json -Compress'], { windowsHide: true });
+    } catch { finish(); return; }
+    p.stdout.on('data', (d) => { s += d; });
+    p.on('error', finish);
+    p.on('close', finish);
+    setTimeout(() => { try { p.kill(); } catch { /* gone */ } finish(); }, 8000).unref();
+  });
+  let list = [];
+  try {
+    const j = JSON.parse(String(out || '').trim() || '[]');
+    list = (Array.isArray(j) ? j : [j])
+      .filter((x) => x && x.Name && x.AppID)
+      .map((x) => ({ name: String(x.Name), id: String(x.AppID) }))
+      .sort((x, y) => x.name.localeCompare(y.name));
+  } catch { list = []; }
+  startAppsCache = { at: Date.now(), list };
+  return list;
+}
+
+function findStartApp(list, name) {
+  const n = String(name || '').trim().toLowerCase();
+  if (!n) return null;
+  return list.find((a) => a.name.toLowerCase() === n)
+    || list.find((a) => a.name.toLowerCase().startsWith(n))
+    || list.find((a) => a.name.toLowerCase().includes(n))
+    || null;
+}
+
 // A locked desktop belongs to the user. Codex stops and asks them to unlock;
 // so does this, before any input is sent.
 async function lockedCheck() {
@@ -592,7 +711,48 @@ const handlers = {
     const wins = await listWindows({ includeHidden: !!args.include_hidden, fresh: true });
     const visible = wins.filter((w) => !policy.isSelf(w))
       .filter((w) => DESKTOP_SCOPE !== 'current' || !w.other_desktop);
-    return text(sessions.note(null, { always: true }) + renderApps(visible, policy, classify));
+    let out = sessions.note(null, { always: true }) + renderApps(visible, policy, classify);
+    if (args.installed) {
+      const want = String(args.installed).trim().toLowerCase();
+      const apps = await startApps();
+      const hits = want === '*' || !want ? apps : apps.filter((a) => a.name.toLowerCase().includes(want));
+      out += `\n\ninstalled apps${want && want !== '*' ? ` matching ${JSON.stringify(want)}` : ''}: ${hits.length}`
+        + (hits.length ? '\n' + hits.slice(0, 200).map((a) => `  ${a.name}`).join('\n') : '')
+        + (hits.length > 200 ? `\n  ... ${hits.length - 200} more; narrow the match` : '')
+        + (apps.length ? '\ncomputer_launch { app: "<name>" } starts one.' : (process.platform === 'win32' ? '\n(the Start-menu listing was empty or timed out)' : '\n(installed-app listing is Windows only)'));
+    }
+    return text(out);
+  },
+
+  async computer_drag(args) {
+    return act('drag', args, (r) => `dragged from (${(r.from || []).join(',')}) to (${(r.to || []).join(',')})${r.button && r.button !== 'left' ? ` with the ${r.button} button` : ''}.`);
+  },
+
+  async computer_appshot(args) {
+    if (args.now) {
+      const fg = (await listWindows({ fresh: true })).find((w) => w.foreground && !policy.isSelf(w));
+      if (!fg) return fail('no_foreground', 'No foreground window to capture.', 'Read a specific window with computer_snapshot { hwnd, with_image: true } instead.');
+      try {
+        const r = await takeAppshot(Number(fg.hwnd), { announce: false });
+        return appshotContent(r.meta, r.text, r.image);
+      } catch (err) { return errorResult(err); }
+    }
+    let meta;
+    try { meta = JSON.parse(fs.readFileSync(path.join(APPSHOT_DIR, 'latest.json'), 'utf8')); }
+    catch {
+      return fail('no_appshot', 'No appshot has been taken.',
+        'The user takes one by pressing both Ctrl keys with a window in front (once Computer Use is running this session); computer_appshot { now: true } captures the foreground window this instant.');
+    }
+    let body;
+    try { body = fs.readFileSync(path.join(APPSHOT_DIR, 'latest.md'), 'utf8'); }
+    catch { return fail('no_appshot', 'The appshot text is missing.', 'Take a new one.'); }
+    let image = null;
+    if (meta.image) {
+      try { image = { data: fs.readFileSync(path.join(APPSHOT_DIR, 'latest.jpg')).toString('base64'), mime: 'image/jpeg' }; } catch { /* text only */ }
+    }
+    pendingAppshot = null;
+    try { fs.writeFileSync(path.join(APPSHOT_DIR, 'latest.json'), JSON.stringify({ ...meta, consumed: true })); } catch { /* fine */ }
+    return appshotContent(meta, body, image);
   },
 
   async computer_status() {
@@ -781,9 +941,11 @@ const handlers = {
     });
     budget.shots++;
     budget.shotBytes += result.bytes;
-    const caption = win
+    let caption = win
       ? `${result.width}x${result.height} of "${win.title}"`
       : `${result.width}x${result.height} of the whole screen`;
+    if (result.capture === 'window') caption += ' (the window is partly behind another; this is the window rendering itself, not the screen)';
+    else if (result.capture === 'screen_occluded') caption += ' (another window covers part of it and the app would not render itself off-screen, so the cover shows)';
     return {
       content: [
         { type: 'text', text: caption },
@@ -822,11 +984,22 @@ const handlers = {
     const { tier, reason } = classify({ process: base, path: app, title: '' });
     if (tier === TIER.BLOCKED) return fail('app_blocked', reason, 'This is not configurable.');
 
+    // A Start-menu name ("Spotify", "Visual Studio Code") resolves through the
+    // shell's app folder, which starts Store apps and shortcuts alike - the
+    // way Codex's list_apps offers installed apps that are not running. A
+    // bare exe name such as notepad still goes through start, below.
+    let startApp = null;
+    if (process.platform === 'win32' && !/[\\/]/.test(app) && !/\.exe$/i.test(app)) {
+      startApp = findStartApp(await startApps(), app);
+    }
+
     const before = await windowSet();
     try {
       let child;
       if (process.platform === 'darwin') {
         child = spawn('open', ['-a', app, ...(args.args ? ['--args', String(args.args)] : [])], { detached: true, stdio: 'ignore' });
+      } else if (startApp) {
+        child = spawn('explorer.exe', ['shell:AppsFolder\\' + startApp.id], { detached: true, stdio: 'ignore', windowsHide: true });
       } else {
         // PowerShell's Start-Process cannot activate a packaged (Store) app
         // from a process without a console of its own - it returns 0 and
@@ -846,11 +1019,12 @@ const handlers = {
     const started = Date.now();
     const fgBefore = (await listWindows()).find((w) => w.foreground);
     const sameApp = (w) => policy.key(w) === base.toLowerCase() || (w.process || '').toLowerCase() === base.toLowerCase();
+    const via = startApp ? ` (Start-menu app "${startApp.name}")` : '';
     while (Date.now() - started < timeout) {
       await sleep(250);
-      const appeared = (await newWindowsSince(before)).filter((w) => !w.minimized);
+      const appeared = (await newWindowsSince(before)).filter((w) => !w.minimized && !w.popup);
       if (appeared.length) {
-        return text(`launched "${app}" after ${Date.now() - started}ms: ${appeared.map(describeWindow).join('; ')}. ` +
+        return text(`launched "${app}"${via} after ${Date.now() - started}ms: ${appeared.map(describeWindow).join('; ')}. ` +
           'Read it with computer_snapshot; computer_grant before acting.');
       }
       // Single-instance apps (Notepad, Calculator, most browsers) open a tab
@@ -1238,6 +1412,7 @@ async function runBusy(on) {
 // The step kinds a run may contain, each mapped to the handler a single call
 // would have used.
 const STEP_HANDLERS = {
+  drag: (a) => handlers.computer_drag(a),
   click: (a) => handlers.computer_click(a),
   type: (a) => handlers.computer_type(a),
   key: (a) => handlers.computer_key(a),
@@ -1410,6 +1585,7 @@ function journalCall(name, args, result) {
     case 'wait_for':
       what = a.text ? `text ${JSON.stringify(String(a.text))}` : a.change ? 'change' : a.new_window ? 'new window' : a.selector ? sel(a.selector) : ''; break;
     case 'clipboard': what = a.text != null ? 'set' : 'read'; break;
+    case 'drag': what = `(${(a.from || []).join(',')})->(${(a.to || []).join(',')})`; break;
   }
   const quiet = kind === 'clipboard';
   const first = quiet ? '' : (bodyOf(result).split('\n').find((l) => l.trim() && !NOTICE_LINE.test(l.trim())) || '');
@@ -1439,6 +1615,11 @@ function withNotices(result, name, args) {
   }
   for (const t of tasks.takeFinished()) {
     notes.push(`[background task ${t.id} ${t.status}: ${t.done}/${t.total} steps on "${t.title}" - computer_task { id: "${t.id}" } for the results]`);
+  }
+  if (pendingAppshot && name !== 'computer_appshot') {
+    const a = pendingAppshot;
+    pendingAppshot = null;
+    notes.push(`[the user took an appshot of "${a.title}" (hwnd ${a.hwnd}) ${Math.max(1, Math.round((Date.now() - a.t) / 1000))}s ago - computer_appshot to see it]`);
   }
   if (!notes.length) return result;
   const c = result && result.content;

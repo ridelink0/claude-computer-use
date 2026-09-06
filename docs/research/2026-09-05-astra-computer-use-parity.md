@@ -150,3 +150,40 @@ wallpaper-derived cursor colour (the plugin's colours are Claude's on purpose).
   through the same validation, so steering cannot smuggle a confirmation in.
 - Result texts stay byte-stable except for the one-off notices, which sit in tool
   results, not in the schema or instructions, so the prompt cache is untouched.
+
+## Second pass (2026-09-06): what ChatGPT's own computer use gained
+
+The first pass answered "what changed in Codex and the API". Gerald's question
+was about ChatGPT's computer use - the thing a user of the ChatGPT desktop app
+sees. That list, from https://learn.chatgpt.com/docs/whats-new,
+https://learn.chatgpt.com/docs/appshots, https://learn.chatgpt.com/docs/computer-use,
+https://learn.chatgpt.com/use-cases/use-your-computer-with-codex,
+https://learn.chatgpt.com/docs/remote, the ChatGPT release notes
+(https://help.openai.com/en/articles/6825453-chatgpt-release-notes, Sep 3 entry),
+the Sep 4 Windows plugin on this PC, and `~/.codex/computer-use/config.json`
+(the Windows overlay: "ChatGPT is using your computer", "Esc to cancel", accent
+#339cff):
+
+| ChatGPT feature | What it is | 0.6.0 |
+|---|---|---|
+| Appshots (macOS) | Both Command keys send the front window - screenshot plus available text, including text outside the visible scroll area - into the chat. Needs Screen Recording and Accessibility. | Both Ctrl keys (Presence.cs sees the physical keys); host emits an `appshot` event; server reads the window (tree with off-screen text, plus a picture) into `<data>/appshots`; `UserPromptSubmit` hook prints the text with the next prompt; `computer_appshot` shows the picture or captures now. |
+| Locked use (macOS) | Keeps approved work going after the Mac locks, including via Remote. | Not possible on Windows (secure desktop); refused as `desktop_locked`, documented. |
+| Remote (mobile) | Start/continue work on a connected Mac or PC from the phone; review progress; approve actions; QR pairing. | Claude Code Remote Control already does this for a session; the skill tells Claude what changes when nobody is at the keyboard. |
+| Review pauses | "Tasks may be paused in ChatGPT and you may be asked to review the action before continuing." | 0.5.0's safety monitor (WARNING line, run halts for review) plus the hand-off tier. |
+| Windows host: occluded capture | Windows.Graphics.Capture screenshots "that work even when windows are occluded". | PrintWindow with PW_RENDERFULLCONTENT when the window is not the topmost thing at its rectangle; blank result falls back to the screen grab and the caption says so. |
+| Windows host: transient UI | Bounded screenshots "for the window and related transient UI" (menus, popups). | Popup pass in list_apps: `#32768`, `Xaml_WindowedPopupClass`, `ComboLBox`, `Chrome_WidgetWin_2` listed as `[menu]`/`[dropdown list]`/`[popup]` with their owner; readable and clickable by index; reported as `New window:`. |
+| Windows host: drag | `drag` for drawing, handwriting, canvas, 3D viewports. | `computer_drag` + `drag` step; host op on both platforms. |
+| Windows host: installed apps | `list_apps` returns installed apps with `lastUsedDate`/`useCount`; `launch_app` by id or path. | `computer_apps { installed }` from Get-StartApps; `computer_launch` resolves Start-menu names through `shell:AppsFolder`. |
+| Always-allowed apps, Esc to cancel, "X is using your computer" | Settings > Computer Use; the on-screen banner. | Already here (always_allowed_apps, banner with Stop, Esc). |
+
+macOS host, two review passes (uncompiled here; the file says so): stable
+window handles via a registry keyed on the AX element (the app's window array
+reorders with z-order, so `pid*1000+index` named a different window after the
+user raised one); Escape sets a stop while acting or while a run is marked
+busy; right/middle/double clicks and point clicks; key chords go to the named
+window's app or refuse (`window_not_focused`) unless `take`; `drag`,
+`clipboard`, `describe`, `busy`, `banner` ops; screenshots by CGWindowID so a
+covered window captures itself; typed newline and tab are keys; snapshot rows
+carry `id`, `selected`, `expanded`, `toggle`; a 4 s walk budget; `wait_for`
+matches `automation_id`; emit is locked across the two threads; policy knows
+macOS process names and strips `.app`.

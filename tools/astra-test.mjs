@@ -79,6 +79,16 @@ check('desktopLocked sees LockApp and LogonUI, ignores minimized', () => {
   assert.equal(desktopLocked([]), null);
 });
 
+check('macOS names: browsers sensitive, terminals shell, login window blocked, .app stripped', () => {
+  assert.equal(classify({ process: 'Safari', path: '/Applications/Safari.app', title: 'x' }).tier, TIER.SENSITIVE);
+  assert.equal(classify({ process: 'Google Chrome', title: 'x' }).tier, TIER.SENSITIVE);
+  assert.equal(classify({ process: 'Terminal', title: 'x' }).tier, TIER.SHELL);
+  assert.equal(classify({ process: 'iTerm2', title: 'x' }).tier, TIER.SHELL);
+  assert.equal(classify({ process: 'loginwindow', title: 'x' }).tier, TIER.BLOCKED);
+  assert.equal(classify({ process: 'Keychain Access', title: 'x' }).tier, TIER.BLOCKED);
+  assert.equal(classify({ process: 'TextEdit', path: '/System/Applications/TextEdit.app', title: 'x' }).tier, TIER.STANDARD);
+});
+
 console.log('safety monitor');
 check('probe names the rows that read like instructions', () => {
   const rows = [
@@ -222,6 +232,16 @@ await checkAsync('finished tasks are handed out exactly once', async () => {
   assert.equal(tasks.takeFinished().length, 0);
 });
 
+await checkAsync('drag is a step kind and validates like the others', async () => {
+  const { parseStep } = await import('../server/tasks.mjs');
+  const s = parseStep({ drag: { from: [10, 10], to: [200, 120] } }, 1);
+  assert.equal(s.kind, 'drag');
+  assert.deepEqual(s.args.to, [200, 120]);
+  const v = validateSteps([{ drag: { from: [1, 2], to: [3, 4] }, hwnd: 55 }], {});
+  assert.equal(v.errors.length, 0);
+  assert.equal(v.plan[0].target.hwnd, 55);
+});
+
 console.log('hooks');
 const hooks = JSON.parse(fs.readFileSync(path.join(ROOT, 'hooks', 'hooks.json'), 'utf8')).hooks;
 const src = fs.readFileSync(path.join(ROOT, 'server', 'index.mjs'), 'utf8');
@@ -241,6 +261,33 @@ check('SessionStart recap hook runs on compact and resume only', () => {
   assert.equal(s.matcher, 'compact|resume');
   assert.match(s.hooks[0].command, /recap\.mjs/);
   assert.ok(fs.existsSync(path.join(ROOT, 'hooks', 'recap.mjs')));
+});
+check('UserPromptSubmit appshot hook is wired', () => {
+  const s = hooks.UserPromptSubmit[0];
+  assert.match(s.hooks[0].command, /appshot\.mjs/);
+  assert.ok(fs.existsSync(path.join(ROOT, 'hooks', 'appshot.mjs')));
+});
+await checkAsync('appshot hook prints a fresh appshot once, then stays silent', async () => {
+  const adir = path.join(tmp, 'hookdata', 'appshots');
+  fs.mkdirSync(adir, { recursive: true });
+  fs.writeFileSync(path.join(adir, 'latest.md'), 'Appshot of "Untitled - Notepad" (notepad, hwnd 77) taken 10:00:\n\ns1 "Untitled - Notepad" hwnd=77 | 3 shown\n[1] Edit "Text editor" "hello"\n');
+  fs.writeFileSync(path.join(adir, 'latest.json'), JSON.stringify({ t: Date.now() - 5000, hwnd: 77, title: 'Untitled - Notepad', process: 'notepad', chars: 90, image: true, consumed: false }));
+  const run = () => new Promise((resolve) => {
+    const p = spawn(process.execPath, [path.join(ROOT, 'hooks', 'appshot.mjs'), path.join(tmp, 'hookdata')], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '';
+    p.stdout.on('data', (d) => { out += d; });
+    p.on('close', () => resolve(out));
+    p.stdin.end(JSON.stringify({ session_id: 'x', hook_event_name: 'UserPromptSubmit', prompt: 'hi' }));
+  });
+  const first = await run();
+  assert.match(first, /took an appshot \d+s ago/);
+  assert.match(first, /Handle 77 is live/);
+  assert.match(first, /\[1\] Edit "Text editor" "hello"/);
+  assert.match(first, /computer_appshot/);
+  const second = await run();
+  assert.equal(second, '');
+  const meta = JSON.parse(fs.readFileSync(path.join(adir, 'latest.json'), 'utf8'));
+  assert.equal(meta.consumed, true);
 });
 
 console.log('live server (no host)');
@@ -274,13 +321,12 @@ const c = client({ CU_PLUGIN_DATA: data, CU_CONFIRM: 'on' });
 try {
   await checkAsync('initialize and the two new tools are listed', async () => {
     const init = await c.send('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } });
-    assert.equal(init.result.serverInfo.version, '0.5.0');
+    assert.equal(init.result.serverInfo.version, '0.6.0');
     const list = await c.send('tools/list', {});
     const names = list.result.tools.map((t) => t.name);
-    assert.ok(names.includes('computer_recap'));
-    assert.ok(names.includes('computer_turn_ended'));
+    for (const n of ['computer_recap', 'computer_turn_ended', 'computer_drag', 'computer_appshot']) assert.ok(names.includes(n), n);
     const chars = JSON.stringify(list.result.tools).length;
-    assert.ok(chars / 4 <= 2750, `schema ~${Math.round(chars / 4)} tokens`);
+    assert.ok(chars / 4 <= 3000, `schema ~${Math.round(chars / 4)} tokens`);
     console.log(`       schema ~${Math.round(chars / 4)} tokens`);
     const task = list.result.tools.find((t) => t.name === 'computer_task');
     assert.ok(task.inputSchema.properties.steps);
@@ -304,6 +350,12 @@ try {
     assert.match(r.text, /notes:\n\s+\d\d:\d\d the total field is \[12\]/);
     const f = await c.call('computer_recap', { find: 'total field' });
     assert.match(f.text, /journal entries matching "total field": 1/);
+  });
+  await checkAsync('no appshot yet is a clear error, not a crash', async () => {
+    const r = await c.call('computer_appshot', {});
+    assert.equal(r.isError, true);
+    assert.match(r.text, /no_appshot/);
+    assert.match(r.text, /both Ctrl keys/);
   });
   await checkAsync('API-error turn end reads as such', async () => {
     await c.call('computer_turn_ended', { session_id: 'sess-live', reason: 'api_error' });

@@ -332,6 +332,7 @@ export function renderApps(windows, policy, classify) {
     if (w.minimized) title += ' [minimized]';
     if (w.other_desktop) title += ' [other virtual desktop]';
     if (w.foreground) title += ' [foreground]';
+    if (w.popup) title += w.owner ? ` [popup of hwnd ${w.owner}]` : ' [popup]';
     lines.push(`${hwnd} ${t} ${app} ${title}`);
   }
   lines.push('');

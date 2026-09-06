@@ -27,7 +27,9 @@ A second search when a task needs them: `computer_type`, `computer_key`,
 
 1. `computer_apps` - find the window. Note its `hwnd` and tier. If the app is
    not running, `computer_launch { app: "notepad" }` starts it and returns the
-   new window's handle.
+   new window's handle; a Start-menu name works too (`"Spotify"`, `"Visual
+   Studio Code"`), and `computer_apps { installed: "spot" }` lists what is
+   installed when you are not sure of the name.
 2. `computer_snapshot { hwnd }` - read it once. Every element gets an index that
    stays valid for as long as that control exists. Reading never needs a grant
    and never disturbs anyone.
@@ -188,6 +190,31 @@ change - one call, not four. Never `replace: true` on the address bar: it is a
 container that refuses both a value and the focus, and returns `focus_failed`
 every time.
 
+## Menus, popups and dialogs
+
+A right-click, a dropdown arrow or a menu bar opens a window of its own.
+`computer_apps` lists it as `[menu]`, `[dropdown list]` or `[popup]` with the
+window that owns it, and every action reports it as `New window:` the moment
+it appears. Read it by its `hwnd` like any window and click its entries by
+index; do not guess coordinates into it. It closes on Escape.
+
+## Drag
+
+`computer_drag { hwnd, from: [x, y], to: [x, y] }` - or `{ drag: { from, to } }`
+as a step - presses, moves and releases: canvases, sliders, handwriting, a 3D
+viewport, a splitter. Screen coordinates, from a read with `with_rects: true`.
+It is physical, so the window has to be in front and the user idle, like a
+real click. `button` and `steps` are optional.
+
+## Appshots
+
+While Computer Use is running, the user can press **both Ctrl keys** with a
+window in front. That files an appshot of it - the tree with its off-screen
+text, plus a picture - and the text arrives in front of you with their next
+prompt. It is what they are looking at, and usually what the prompt is about;
+its handle is live. `computer_appshot` shows the picture as well, and
+`computer_appshot { now: true }` captures the foreground window this instant.
+
 ## Targeting, best to worst
 
 - `index` from a snapshot of that window. The host checks the element is still
@@ -265,6 +292,9 @@ reading and pattern parts now and retry the rest later.
 | `hand_off_required` | an age check, a CAPTCHA or a safety warning: the user does that step themselves; `confirmed: true` does not lift it |
 | `task_finished` | the background run you tried to steer has already ended; its results are in `computer_task`, send the rest as a new run |
 | `op_timeout` | a read or action outran the host; wait two seconds and retry it once, then `computer_status` - never guess indices after a timeout |
+| `obscured` | the point is under another window; target by index instead, or move the window |
+| `bad_points` | `computer_drag` needs `from` and `to` as `[x, y]` |
+| `no_appshot` | nothing has been filed yet; `computer_appshot { now: true }` captures the foreground window |
 
 ## Permissions
 
@@ -336,7 +366,16 @@ in the same window means stop, tell the user, and agree who does what.
   only its frame is readable - that is Windows, not a broken or empty app. Do
   not click at its coordinates; they belong to whatever is in front of the user.
 - Several monitors just work; pass `hwnd` to `computer_screenshot` to capture one
-  window rather than every display.
+  window rather than every display. A window that is partly behind another is
+  captured as it renders itself, not as the screen shows it; the caption says
+  when that happened, and when an app would not render off-screen.
+- **Driven from a phone** (Claude Code Remote Control): nobody is at the
+  keyboard, so `share` mode never waits and `take` is natural; the banner's
+  Stop and the Esc key are for whoever is at the desk. Progress for the user
+  on the phone is your words plus `computer_snapshot { with_image: true }`.
+- **A locked Windows desktop cannot be driven** (`desktop_locked`); the lock
+  screen is the user's. Codex's locked use is a macOS-only trick and is not
+  here.
 - `app notes:` on a grant are that app's traps. Read them.
 - `computer_clipboard` reads the clipboard text, or sets it when given `text`.
   That is how text leaves a canvas app (select, `ctrl+c`, read) and how a long

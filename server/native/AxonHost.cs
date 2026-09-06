@@ -46,6 +46,28 @@ namespace Axon
         [DllImport("user32.dll")] internal static extern bool SetForegroundWindow(IntPtr h);
         [DllImport("user32.dll")] internal static extern bool ShowWindow(IntPtr h, int cmd);
         [DllImport("user32.dll")] internal static extern bool IsIconic(IntPtr h);
+        [DllImport("user32.dll")] internal static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
+        [DllImport("user32.dll", EntryPoint = "GetWindow")] internal static extern IntPtr GetWindowRel(IntPtr h, uint cmd);
+
+        // True when the window is the topmost thing at its centre and four inset
+        // corners - that is, a grab of its screen rectangle shows the window and
+        // not something lying over it. Overlay windows of this host do not count.
+        internal static bool IsUnobscured(IntPtr h, RECT r)
+        {
+            int w = r.Right - r.Left, ht = r.Bottom - r.Top;
+            if (w <= 0 || ht <= 0) return false;
+            int[][] pts = new int[][] {
+                new int[] { r.Left + w / 2, r.Top + ht / 2 },
+                new int[] { r.Left + 8, r.Top + 8 }, new int[] { r.Right - 8, r.Top + 8 },
+                new int[] { r.Left + 8, r.Bottom - 8 }, new int[] { r.Right - 8, r.Bottom - 8 },
+            };
+            foreach (int[] p in pts)
+            {
+                IntPtr at = RootWindowAt(p[0], p[1]);
+                if (at != h && !Overlay.IsAnyOverlayWindow(at)) return false;
+            }
+            return true;
+        }
         [DllImport("user32.dll")] internal static extern bool IsWindowVisible(IntPtr h);
         [DllImport("user32.dll")] internal static extern bool IsWindow(IntPtr h);
         [DllImport("user32.dll")] internal static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
@@ -387,6 +409,22 @@ namespace Axon
             // arm a stop that fails Claude's next action minutes later, and
             // withdraws every grant with it. Releasing any input hold is
             // unconditional, because that is never the wrong thing to do.
+            // Both Ctrl keys pressed together: an appshot. The host only says
+            // which window is in front; the server reads it the way it reads
+            // anything and files it for the next prompt (see index.mjs).
+            Presence.OnAppshot = delegate
+            {
+                try
+                {
+                    IntPtr fg = Native.GetForegroundWindow();
+                    if (fg == IntPtr.Zero || Overlay.IsAnyOverlayWindow(fg)) return;
+                    Dictionary<string, object> ev = new Dictionary<string, object>();
+                    ev["event"] = "appshot";
+                    ev["hwnd"] = Hwnd(fg);
+                    WriteLine(ev);
+                }
+                catch { }
+            };
             Presence.OnPanic = delegate
             {
                 Native.EndExclusive();
@@ -509,6 +547,7 @@ namespace Axon
                 case "describe": return OpDescribe(a);
                 case "busy": return OpBusy(a);
                 case "banner": return OpBanner(a);
+                case "drag": return OpDrag(a);
                 default: throw new AxonError("unknown_op", "Unknown operation '" + op + "'.");
             }
         }
@@ -890,6 +929,61 @@ namespace Axon
                 }
                 catch { }
             }
+
+            // Menus, dropdown lists and popups, listed with a stand-in title and
+            // the window that owns them, so a context menu that a click just
+            // opened shows up as a new window and can be read and clicked by index.
+            try
+            {
+                Native.EnumWindows(delegate(IntPtr h, IntPtr lp)
+                {
+                    try
+                    {
+                        long key = Hwnd(h);
+                        if (seen.ContainsKey(key)) return true;
+                        if (!Native.IsWindowVisible(h) || Native.IsIconic(h)) return true;
+                        if (Overlay.IsAnyOverlayWindow(h)) return true;
+                        System.Text.StringBuilder cb = new System.Text.StringBuilder(128);
+                        Native.GetClassName(h, cb, cb.Capacity);
+                        string cls = cb.ToString();
+                        if (!IsPopupClass(cls)) return true;
+                        Native.RECT rr;
+                        if (!Native.GetWindowRect(h, out rr)) return true;
+                        int rw = rr.Right - rr.Left, rh = rr.Bottom - rr.Top;
+                        // Tooltips share a class with browser menus; height tells them apart.
+                        if (rw < 40 || rh < (cls == "Chrome_WidgetWin_2" ? 60 : 24)) return true;
+                        uint wpid;
+                        Native.GetWindowThreadProcessId(h, out wpid);
+                        if ((int)wpid == _selfPid) return true;
+                        string pname, ppath;
+                        ProcessInfo((int)wpid, out pname, out ppath);
+                        System.Text.StringBuilder sb = new System.Text.StringBuilder(256);
+                        Native.GetWindowTextW(h, sb, sb.Capacity);
+                        string title = sb.ToString();
+                        if (title.Length == 0)
+                            title = cls == "#32768" ? "[menu]" : (cls == "ComboLBox" ? "[dropdown list]" : "[popup]");
+
+                        Dictionary<string, object> e2 = new Dictionary<string, object>();
+                        e2["hwnd"] = key;
+                        e2["title"] = title;
+                        e2["class"] = cls;
+                        e2["pid"] = (int)wpid;
+                        e2["process"] = pname;
+                        e2["path"] = ppath;
+                        e2["rect"] = new int[] { rr.Left, rr.Top, rw, rh };
+                        e2["minimized"] = false;
+                        e2["foreground"] = false;
+                        e2["popup"] = true;
+                        long owner = Hwnd(Native.GetWindowRel(h, 4 /* GW_OWNER */));
+                        if (owner != 0) e2["owner"] = owner;
+                        seen[key] = true;
+                        list.Add(e2);
+                    }
+                    catch { }
+                    return true;
+                }, IntPtr.Zero);
+            }
+            catch { }
 
             Dictionary<string, object> res = new Dictionary<string, object>();
             res["windows"] = list;
@@ -2045,6 +2139,90 @@ namespace Axon
         // How many other Claude sessions are live right now. The MCP layer owns
         // that count - it is the one that reads the session registry - and pushes
         // it here so the banner can name itself only while it needs to.
+        // Two numbers out of a JSON array, or null.
+        static int[] Pair(object o)
+        {
+            if (o == null || o is string) return null;
+            System.Collections.IEnumerable list = o as System.Collections.IEnumerable;
+            if (list == null) return null;
+            List<int> vals = new List<int>();
+            foreach (object v in list) vals.Add(Int(v, 0));
+            return vals.Count >= 2 ? new int[] { vals[0], vals[1] } : null;
+        }
+
+        // A drag: press at one point, move through a few intermediate points,
+        // release at another. Canvases, sliders, handwriting, 3D viewports -
+        // Codex added it for exactly those. Physical by nature: it needs the
+        // pointer and the window in front, and follows the same coexistence
+        // rules as a physical click.
+        static object OpDrag(Dictionary<string, object> a)
+        {
+            Dictionary<string, object> res = new Dictionary<string, object>();
+            int[] from = Pair(Get(a, "from"));
+            int[] to = Pair(Get(a, "to"));
+            if (from == null || to == null)
+                throw new AxonError("bad_points", "drag needs from:[x,y] and to:[x,y] in screen coordinates.",
+                    "Read the window with with_rects:true to find the points.");
+            string button = Str(Get(a, "button"));
+            if (button == null || button.Length == 0) button = "left";
+            int steps = Int(Get(a, "steps"), 12);
+            if (steps < 2) steps = 2;
+            if (steps > 200) steps = 200;
+            int holdMs = Int(Get(a, "hold_ms"), 60);
+            if (holdMs < 0) holdMs = 0;
+            if (holdMs > 2000) holdMs = 2000;
+
+            AutomationElement win = RequireWindow(a);
+            IntPtr expectWindow = new IntPtr(win.Current.NativeWindowHandle);
+            NoteWait(res, GuardDisturb(a));
+            RequireForeground(expectWindow, a, res);
+            IntPtr owner = Native.RootWindowAt(from[0], from[1]);
+            if (Overlay.IsAnyOverlayWindow(owner)) owner = expectWindow;
+            if (owner != IntPtr.Zero && owner != expectWindow)
+                throw new AxonError("obscured", "The start point is over another window, so the drag would begin in the wrong one.",
+                    "Move that window, or start from a point of the target that is actually visible.");
+
+            Native.POINT saved;
+            bool haveSaved = Native.GetCursorPos(out saved);
+            bool held = Exclusive(a) && Native.BeginExclusive();
+            bool steppedAside = Overlay.BeginClickThrough(from[0], from[1]);
+            try
+            {
+                Presence.NoteSelfInput();
+                Native.SetCursorPos(from[0], from[1]);
+                System.Threading.Thread.Sleep(30);
+                Native.MouseButton(button, true);
+                System.Threading.Thread.Sleep(holdMs);
+                for (int i = 1; i <= steps; i++)
+                {
+                    int x = from[0] + (to[0] - from[0]) * i / steps;
+                    int y = from[1] + (to[1] - from[1]) * i / steps;
+                    Presence.NoteSelfInput();
+                    Native.SetCursorPos(x, y);
+                    System.Threading.Thread.Sleep(12);
+                }
+                System.Threading.Thread.Sleep(holdMs);
+                Native.MouseButton(button, false);
+                System.Threading.Thread.Sleep(30);
+            }
+            finally
+            {
+                if (held) Native.EndExclusive();
+                if (steppedAside) Overlay.EndClickThrough();
+            }
+            if (haveSaved && !held && ModeOf(a) != "take")
+            {
+                Native.SetCursorPos(saved.X, saved.Y);
+                res["cursor_restored"] = true;
+            }
+            if (held) res["input_held"] = true;
+            res["from"] = from;
+            res["to"] = to;
+            res["button"] = button;
+            res["steps"] = steps;
+            return res;
+        }
+
         // The banner's live status line. Text only; an empty string clears it.
         static object OpBanner(Dictionary<string, object> a)
         {
@@ -2944,6 +3122,8 @@ namespace Axon
 
             Rectangle region = Rectangle.Empty;
             bool wantedWindow = Get(a, "hwnd") != null || Get(a, "title") != null;
+            IntPtr captureHwnd = IntPtr.Zero;
+            Native.RECT captureRect = new Native.RECT();
 
             if (wantedWindow)
             {
@@ -2956,6 +3136,8 @@ namespace Axon
                 if (!Native.GetWindowRect(h, out rr))
                     throw new AxonError("window_rect_failed", "Could not read that window's bounds.",
                         "The window may be closing. Re-list windows and try again.");
+                captureHwnd = h;
+                captureRect = rr;
                 region = new Rectangle(rr.Left, rr.Top, rr.Right - rr.Left, rr.Bottom - rr.Top);
                 // Falling back to a full-screen grab here would quietly hand back
                 // something the caller never asked for, so it is an error instead.
@@ -2973,10 +3155,39 @@ namespace Axon
 
             byte[] bytes;
             int nw, nh;
-            using (Bitmap full = new Bitmap(region.Width, region.Height))
+            string capture = "screen";
+            // 24-bit on purpose: PrintWindow leaves alpha at zero, and a 32-bit
+            // surface would then scale down to black.
+            using (Bitmap full = new Bitmap(region.Width, region.Height, PixelFormat.Format24bppRgb))
             {
-                using (Graphics g = Graphics.FromImage(full))
-                    g.CopyFromScreen(region.Location, Point.Empty, region.Size);
+                bool printed = false;
+                if (wantedWindow && captureHwnd != IntPtr.Zero && !Native.IsUnobscured(captureHwnd, captureRect))
+                {
+                    // Something lies over part of the window, so a screen grab
+                    // would photograph the cover. PrintWindow asks the window to
+                    // render itself; PW_RENDERFULLCONTENT reaches DirectComposition
+                    // surfaces (browsers, WinUI) too. That is what Codex gets from
+                    // Windows.Graphics.Capture: a picture of the window behind
+                    // whatever is in front of it. Some apps draw nothing that way;
+                    // a blank result falls back to the screen grab and says so.
+                    try
+                    {
+                        using (Graphics g = Graphics.FromImage(full))
+                        {
+                            IntPtr hdc = g.GetHdc();
+                            try { printed = Native.PrintWindow(captureHwnd, hdc, 0x00000002 /* PW_RENDERFULLCONTENT */); }
+                            finally { g.ReleaseHdc(hdc); }
+                        }
+                        if (printed && IsBlank(full)) printed = false;
+                    }
+                    catch { printed = false; }
+                    capture = printed ? "window" : "screen_occluded";
+                }
+                if (!printed)
+                {
+                    using (Graphics g = Graphics.FromImage(full))
+                        g.CopyFromScreen(region.Location, Point.Empty, region.Size);
+                }
 
                 double scale = Math.Min(1.0, maxWidth / (double)region.Width);
                 nw = Math.Max(1, (int)(region.Width * scale));
@@ -3016,8 +3227,31 @@ namespace Axon
             res["height"] = nh;
             res["source"] = new int[] { region.X, region.Y, region.Width, region.Height };
             res["bytes"] = bytes.Length;
+            res["capture"] = capture;
             res["data"] = Convert.ToBase64String(bytes);
             return res;
+        }
+
+        // A window that rendered itself as one flat colour drew nothing: some
+        // GPU-composited apps answer PrintWindow with a blank surface.
+        static bool IsBlank(Bitmap b)
+        {
+            int w = b.Width, h = b.Height;
+            if (w < 2 || h < 2) return true;
+            int first = b.GetPixel(w / 2, h / 2).ToArgb();
+            int stepX = Math.Max(1, w / 12), stepY = Math.Max(1, h / 12);
+            for (int y = 0; y < h; y += stepY)
+                for (int x = 0; x < w; x += stepX)
+                    if (b.GetPixel(x, y).ToArgb() != first) return false;
+            return true;
+        }
+
+        // Menus, dropdown lists and popups are top-level windows with no title,
+        // which the passes above skip as furniture. They are how an app asks a
+        // question, though, and Codex reads them as "related transient UI".
+        static bool IsPopupClass(string cls)
+        {
+            return cls == "#32768" || cls == "Xaml_WindowedPopupClass" || cls == "ComboLBox" || cls == "Chrome_WidgetWin_2";
         }
 
         // The clipboard is a COM object that wants a single-threaded apartment,
@@ -3097,7 +3331,7 @@ namespace Axon
             switch (op)
             {
                 case "click": case "type": case "set_value": case "key": case "scroll":
-                case "focus": case "close_window":
+                case "focus": case "close_window": case "drag":
                     return true;
             }
             return false;

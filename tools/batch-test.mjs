@@ -82,8 +82,9 @@ async function main() {
   check('computer_task is a tool', names.includes('computer_task'));
   const schemaTokens = tok(JSON.stringify(tools));
   console.log(`     ${tools.length} tools, schema ~${schemaTokens} tokens`);
-  // 0.5.0 added computer_recap and computer_turn_ended (~140 tokens together).
-  check('always-on schema cost stays under 2,750 tokens', schemaTokens < 2750, String(schemaTokens));
+  // 0.5.0 added computer_recap and computer_turn_ended; 0.6.0 computer_drag
+  // and computer_appshot (~300 tokens for the four).
+  check('always-on schema cost stays under 3,000 tokens', schemaTokens < 3000, String(schemaTokens));
   const snapTool = tools.find((t) => t.name === 'computer_snapshot');
   check('snapshot schema has index, find, full', ['index', 'find', 'full'].every((k) => snapTool.inputSchema.properties[k]));
   const waitTool = tools.find((t) => t.name === 'computer_wait_for');

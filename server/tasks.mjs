@@ -15,7 +15,7 @@
 // toolset defines the contract followed here - run in order, stop at the first
 // failure, and report every step that did not run rather than dropping it.
 
-const STEP_KINDS = ['click', 'type', 'key', 'scroll', 'wait_for', 'snapshot', 'sleep', 'focus'];
+const STEP_KINDS = ['click', 'type', 'key', 'scroll', 'wait_for', 'snapshot', 'sleep', 'focus', 'drag'];
 
 // Per-step fields that change how a step runs rather than what it does.
 const STEP_EXTRAS = ['confirmed', 'mode', 'background', 'physical'];
@@ -164,6 +164,7 @@ function describeStep(kind, args) {
     case 'snapshot': return `snapshot${args.find ? ` find ${JSON.stringify(args.find)}` : ''}${args.index != null ? ` [${args.index}]` : ''}`;
     case 'sleep': return `sleep ${args.ms}ms`;
     case 'focus': return 'focus';
+    case 'drag': return `drag (${(args.from || []).join(',')})->(${(args.to || []).join(',')})`;
   }
   return kind;
 }
