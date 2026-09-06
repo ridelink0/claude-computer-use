@@ -16,6 +16,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const suites = [
   'policy-test.mjs',
   'sessions-test.mjs',
+  'astra-test.mjs',
   'build-test.mjs',
   'verify.mjs',
   'presence-test.mjs',

@@ -508,6 +508,7 @@ namespace Axon
                 case "clipboard": return OpClipboard(a);
                 case "describe": return OpDescribe(a);
                 case "busy": return OpBusy(a);
+                case "banner": return OpBanner(a);
                 default: throw new AxonError("unknown_op", "Unknown operation '" + op + "'.");
             }
         }
@@ -2044,6 +2045,18 @@ namespace Axon
         // How many other Claude sessions are live right now. The MCP layer owns
         // that count - it is the one that reads the session registry - and pushes
         // it here so the banner can name itself only while it needs to.
+        // The banner's live status line. Text only; an empty string clears it.
+        static object OpBanner(Dictionary<string, object> a)
+        {
+            string t = Str(Get(a, "text"));
+            if (t == null) t = "";
+            if (t.Length > 60) t = t.Substring(0, 60);
+            Overlay.Status(t);
+            Dictionary<string, object> res = new Dictionary<string, object>();
+            res["status"] = t;
+            return res;
+        }
+
         static object OpSession(Dictionary<string, object> a)
         {
             Overlay.Configure(

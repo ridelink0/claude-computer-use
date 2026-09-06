@@ -326,6 +326,50 @@ command line by another door.
 `node tools/cli.mjs snapshot '{"title":"Notepad"}'` drives the server from a
 shell against your real windows and prints what each call cost.
 
+## Notes across context windows, and what a turn ending means
+
+GPT-6 Astra's computer use (September 2026) added a few things worth having
+here, and 0.5.0 has them - built the way Claude Code can actually use them:
+
+- **Notes across context windows.** The server keeps a journal of every call -
+  what, where, what came back - and your notes. After a compaction or a resume,
+  the plugin's SessionStart hook prints it back into context by itself;
+  `computer_recap` gives the live version any time (grants, the windows you
+  worked in with their still-valid handles and indices, running tasks, notes,
+  the last actions) and `computer_recap { find }` searches all of it.
+  `computer_recap { note }` saves a note that survives compaction.
+- **The turn ending is a boundary.** Codex's plugin is told when the turn ends
+  and stops issuing input. So is this one: a Stop hook calls
+  `computer_turn_ended`, a background run stops after its current step, and the
+  next result says so. If you would rather let runs finish, the setting
+  "Background runs at turn end" does that. A background run nobody has checked
+  on for ten minutes stops on its own either way.
+- **Async results without polling.** A finished background run is announced at
+  the top of the next result, whatever tool that is.
+- **Steering.** `computer_task { id, steps }` appends steps to a running
+  background run without cancelling it.
+- **A safety monitor.** Astra pauses a task when the agent may have taken
+  something for an instruction. Here, a read whose rows read like instructions
+  to an agent gets one `WARNING:` line naming them, and a run that reads such a
+  window halts there so the user hears about it first.
+- **Hand-off.** Age verification, CAPTCHAs, "proceed anyway" safety warnings and
+  paywall bypasses are refused outright, not confirmable. The confirmation list
+  now also covers account creation, saved passwords and cards, API keys,
+  browser extensions, "run anyway", sharing and permission changes, bookings,
+  and social reactions. The lock screen, the Claude/ChatGPT/Codex desktop apps,
+  authenticators and wallets are blocked; remote-desktop clients are sensitive.
+- **The banner says what it is doing** - "Claude is using your computer ·
+  typing in notepad", "· thinking" - in Claude's own colours, the way Codex's
+  preview shows its activity.
+
+**If the internet drops** mid-task: everything here runs locally, so nothing on
+the desktop breaks, but Claude's turn ends on the API side. The StopFailure hook
+treats that exactly like Stop - background runs stop after their current step -
+and the journal has everything up to that moment, so a resumed session picks up
+with `computer_recap`. The journal lives in the plugin's data directory beside
+the session registry, one file per server process, pruned after a week; typed
+text in it is cut to 24 characters and clipboard contents are never written.
+
 ## Install
 
 ```

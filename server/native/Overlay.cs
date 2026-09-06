@@ -122,6 +122,26 @@ namespace Axon
         static string _sessionLabel;
         static int _peers;
 
+        // What Claude is doing right now, in a few words, after the banner's
+        // message: "typing in notepad", "thinking". Codex's preview window
+        // shows the activity; a banner that says what it is doing is the same
+        // reassurance at a fraction of the screen.
+        static string _status = "";
+
+        internal static void Status(string s)
+        {
+            _status = s ?? "";
+            if (!Enabled || _banner == null) return;
+            try
+            {
+                _banner.BeginInvoke((MethodInvoker)delegate
+                {
+                    try { _banner.Relayout(); } catch { }
+                });
+            }
+            catch { }
+        }
+
         internal static void Configure(int slot, string label, int peers)
         {
             _slot = slot < 0 ? 0 : (slot > 8 ? 8 : slot);
@@ -684,9 +704,12 @@ namespace Axon
             // confused with. One Claude on the machine needs no qualifier.
             static string MessageText()
             {
+                string m = BaseMessage;
                 if (_peers > 0 && !string.IsNullOrEmpty(_sessionLabel))
-                    return BaseMessage + " (" + _sessionLabel + " of " + (_peers + 1).ToString(System.Globalization.CultureInfo.InvariantCulture) + ")";
-                return BaseMessage;
+                    m = m + " (" + _sessionLabel + " of " + (_peers + 1).ToString(System.Globalization.CultureInfo.InvariantCulture) + ")";
+                if (!string.IsNullOrEmpty(_status))
+                    m = m + " 00B7 " + _status;
+                return m;
             }
 
             // Which monitor the banner belongs on. Centring it on the virtual

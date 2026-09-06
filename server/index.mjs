@@ -9,14 +9,15 @@ import { createInterface } from 'node:readline';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { Driver, HostError } from './driver.mjs';
-import { Policy, classify, isConsequential, TIER } from './policy.mjs';
-import { renderSnapshot, renderApps, buildRows, renderDelta, diffRows, subtreeNodes, findMatcher, nodeMatches, leanNodes } from './render.mjs';
+import { Policy, classify, isConsequential, isHandOff, desktopLocked, TIER } from './policy.mjs';
+import { renderSnapshot, renderApps, buildRows, renderDelta, diffRows, subtreeNodes, findMatcher, nodeMatches, leanNodes, probeWarning } from './render.mjs';
 import { profileHint } from './profiles.mjs';
 import { Sessions, LeaseBusy } from './sessions.mjs';
-import { Tasks, validateSteps } from './tasks.mjs';
+import { Tasks, validateSteps, HALT_TURN } from './tasks.mjs';
+import { Journal } from './journal.mjs';
 
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
-const SERVER_INFO = { name: 'computer-use', version: '0.4.0' };
+const SERVER_INFO = { name: 'computer-use', version: '0.5.0' };
 
 // Claude Code puts a server's instructions in front of the model at the start
 // of every session, before any tool schema has been loaded. For a deferred
@@ -51,6 +52,34 @@ const driver = new Driver({
 const policy = new Policy();
 policy.markSelf([process.pid, process.ppid]);
 const tasks = new Tasks();
+
+// Notes across context windows: one line per call, in the shared data dir,
+// handed back by computer_recap and by the SessionStart hook after a
+// compaction (see journal.mjs).
+const journal = new Journal({ dir: sessions.dir });
+
+// What happens to a background run when the turn ends. Codex stops issuing
+// input at turn end; that is the default here too, because a run that goes on
+// with nobody reading its results is a run nobody is supervising.
+const BACKGROUND_AT_TURN_END =
+  /^finish$/i.test(String(process.env.CU_BACKGROUND_AT_TURN_END || '').trim()) ? 'finish' : 'stop';
+// Set by the Stop hook; said once, at the top of the next result.
+let turnEnded = null;
+// The window the last action went to, for the journal line of a call that
+// named its target by index alone.
+let lastActedHwnd = null;
+
+// The banner's live status: what Claude is doing right now, in three words.
+// Fire and forget, and never a reason to start the host.
+let lastStatus = '';
+function bannerStatus(s) {
+  const t = String(s || '');
+  if (t === lastStatus || !driver.proc) return;
+  lastStatus = t;
+  driver.call('banner', { text: t }, { timeoutMs: 2000 }).catch(() => {});
+}
+const appWord = (win) => String(win && win.process || '').replace(/\.exe$/i, '') || 'a window';
+const VERB = { click: 'clicking', type: 'typing', set_value: 'typing', key: 'pressing keys', scroll: 'scrolling' };
 
 // Screenshots are the expensive path by roughly an order of magnitude. Track
 // them so the model can see what it is spending and prefer trees.
@@ -235,8 +264,8 @@ const TOOLS = [
   },
   {
     name: 'computer_task',
-    description: 'Progress of a background run: its step results so far, or wait up to wait_ms for it to finish. cancel:true stops it after the current step.',
-    inputSchema: { type: 'object', properties: { id: str, wait_ms: int, cancel: bool } },
+    description: 'Progress of a background run: its step results so far, or wait up to wait_ms for it to finish. steps:[...] appends steps to it while it runs. cancel:true stops it after the current step.',
+    inputSchema: { type: 'object', properties: { id: str, wait_ms: int, cancel: bool, steps: { type: 'array', items: { type: 'object' } } } },
   },
   {
     name: 'computer_close_window',
@@ -253,6 +282,17 @@ const TOOLS = [
     description: 'Host health, DPI mode, grants, running tasks, and token spend this session.',
     annotations: READ_ONLY,
     inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'computer_recap',
+    description: 'This session so far: grants, windows worked in, tasks, notes, last actions. Call it after a compaction. find searches the whole journal; note saves a note that survives compaction.',
+    annotations: READ_ONLY,
+    inputSchema: { type: 'object', properties: { last: int, find: str, note: str } },
+  },
+  {
+    name: 'computer_turn_ended',
+    description: 'Called by the plugin Stop hook when your turn ends. Not for you to call.',
+    inputSchema: { type: 'object', properties: { session_id: str, reason: str } },
   },
 ];
 
@@ -391,8 +431,16 @@ function targetName(args, hwnd) {
 const CONFIRM_ENABLED = !/^(off|false|0|no)$/i.test(String(process.env.CU_CONFIRM || '').trim());
 
 function consequenceCheck(op, args, hwnd, name) {
+  if (op !== 'click' || !name) return null;
+  // Codex's hand-off mode: some steps are the person's to take, whatever they
+  // have said. Not switched off by the confirmation setting, not lifted by
+  // confirmed:true.
+  if (isHandOff(name)) {
+    return fail('hand_off_required',
+      `"${name}" is a step the user has to take themselves - an age check, a CAPTCHA, or a safety warning that exists to be read by a person.`,
+      'Say what is on screen and ask them to do that step, then carry on with the rest.');
+  }
   if (!CONFIRM_ENABLED) return null;
-  if (op !== 'click') return null;
   if (args.confirmed === true) return null;
   if (!isConsequential(name)) return null;
   return fail('needs_confirmation',
@@ -425,6 +473,16 @@ function offDesktopCheck(win) {
   return fail('other_desktop',
     `"${win.title || win.process}" is on a different virtual desktop, and this install is set to work only on the desktop you are looking at.`,
     'Switch to that desktop, or set the plugin\'s "Virtual desktops Claude may work on" setting to "all".');
+}
+
+// A locked desktop belongs to the user. Codex stops and asks them to unlock;
+// so does this, before any input is sent.
+async function lockedCheck() {
+  let lock = null;
+  try { lock = desktopLocked(await listWindows()); } catch { return null; }
+  if (!lock) return null;
+  return fail('desktop_locked', 'The desktop is locked.',
+    'Ask the user to unlock it. Computer Use never types into the lock screen or a login prompt.');
 }
 
 // The tier rule for pixels lives in policy, where the tier rule for trees
@@ -625,6 +683,8 @@ const handlers = {
 
     const opts = { ...renderOptsOf(args), ms: call.ms };
     let body;
+    // The rows this read shows, for the safety monitor below.
+    let shownRows = [];
     if (args.index != null) {
       const sub = subtreeNodes(result.nodes, args.index);
       if (!sub) {
@@ -632,14 +692,17 @@ const handlers = {
           'Take a snapshot of the window to see its current indices.');
       }
       body = renderSnapshot(result, { ...opts, nodes: sub, scope: `subtree of [${args.index}]`, lean: true });
+      shownRows = buildRows(result, { ...opts, nodes: sub }).rows;
     } else if (args.find) {
       const matcher = findMatcher(args.find);
       const hits = (result.nodes || []).filter((n) => nodeMatches(n, matcher));
       body = renderSnapshot(result, { ...opts, nodes: hits, scope: `find ${JSON.stringify(String(args.find))} in ${(result.nodes || []).length} elements`, lean: true });
       if (!hits.length) body += '\n(no element matches; try a shorter word, or read the window without find)';
+      shownRows = buildRows(result, { ...opts, nodes: hits }).rows;
     } else {
       const view = args.interactive_only ? leanNodes(result.nodes) : result.nodes;
       const built = buildRows(result, { ...opts, nodes: view });
+      shownRows = built.rows;
       const fullRows = args.interactive_only ? buildRows(result, opts).rows : built.rows;
       const sig = readSig(args);
       const prev = lastRead.get(hwnd);
@@ -661,7 +724,10 @@ const handlers = {
 
     // App notes ride on the grant, which every acting task takes exactly
     // once; repeating them on every read cost more than the read.
-    body = presenceNote(await presence()) + injectionBanner(win) + body;
+    // ...and the safety monitor: rows that read like instructions to an agent
+    // are named once, in front, as the page data they are.
+    body = presenceNote(await presence()) + injectionBanner(win) + probeWarning(shownRows) + body;
+    bannerStatus('reading ' + appWord(win));
 
     const content = [{ type: 'text', text: body }];
     if (args.with_image) {
@@ -1037,12 +1103,16 @@ const handlers = {
       const snap = await handlers.computer_snapshot({ hwnd: closeHwnd, ...(prev ? prev.args : { interactive_only: true }) });
       return (elsewhere ? `after the run (in "${r.lastTitle}", hwnd ${closeHwnd}):\n` : 'after the run:\n') + bodyOf(snap);
     };
-    const ctx = { hwnd, title: win.title, resolveWindow };
+    const ctx = { hwnd, title: win.title, resolveWindow, review: true };
     const opts = { stopOnError: args.stop_on_error !== false };
 
     if (background) {
       await runBusy(true);
-      const task = tasks.start(v.plan, ctx, call, { ...opts, after: args.read_after === false ? null : after });
+      const task = tasks.start(v.plan, ctx, call, {
+        ...opts, after: args.read_after === false ? null : after,
+        // A background run nobody checks on for this long stops on its own.
+        orphanAfterMs: 10 * 60_000,
+      });
       task.promise.finally(() => runBusy(false));
       return text(sessions.note(hwnd) +
         `task ${task.id} started: ${v.expanded} step(s) on "${win.title}" (hwnd ${hwnd}). ` +
@@ -1072,9 +1142,57 @@ const handlers = {
       return fail('no_task', args.id ? `No task "${args.id}".` : 'No background run has been started.',
         'Start one with computer_run { background: true }.');
     }
+    t.lastPolled = Date.now();
+    let head = '';
+    // Steering: more steps for a run that is still going.
+    if (Array.isArray(args.steps) && args.steps.length) {
+      const r = tasks.append(t, args.steps);
+      if (r.error) {
+        return fail(r.code, r.error, r.code === 'task_finished'
+          ? 'Its results are in computer_task; send the further steps as a new computer_run.'
+          : 'Nothing was added. Fix the steps named above and call again.');
+      }
+      head = `appended ${r.added} step(s) as steps ${r.from}-${r.to}; they run after the current one.\n`;
+    }
     if (args.cancel && t.status === 'running') t.cancelled = true;
     await tasks.wait(t, Math.max(0, Math.min(Number(args.wait_ms) || 0, 60000)));
-    return text(tasks.describe(t));
+    // Described here, so the finished-run notice is not repeated on top.
+    t.reported = true;
+    return text(head + tasks.describe(t));
+  },
+
+  // Notes across context windows. The live state the model loses at a
+  // compaction, and the journal of what it did, in a few lines.
+  async computer_recap(args) {
+    if (args.note != null && String(args.note).trim()) {
+      journal.note(args.note);
+      return text(`noted: ${String(args.note).replace(/\s+/g, ' ').trim().slice(0, 200)}`);
+    }
+    const grants = policy.listGrants();
+    const running = tasks.running();
+    const extra = [
+      grants.length ? `input granted to: ${grants.map((g) => `${g.app} (${g.tier})`).join(', ')}` : 'input granted to: nothing yet',
+      running.length ? `background runs: ${running.map((t) => `${t.id} ${t.done}/${t.total} on "${t.title}"`).join('; ')}` : '',
+    ];
+    const last = Math.max(5, Math.min(Number(args.last) || 30, 200));
+    return text(journal.recap({ last, find: args.find ? String(args.find) : null, extra }));
+  },
+
+  // The Stop hook's target, the way Codex's node_repl has turn_ended. The
+  // turn is over: background runs stop after their current step (unless the
+  // install says let them finish), the banner's status clears, and the next
+  // call is told what happened. This must never start the host - a session
+  // that never used Computer Use would otherwise compile it on its first Stop.
+  async computer_turn_ended(args) {
+    if (args.session_id) journal.identify(String(args.session_id));
+    const why = args.reason === 'api_error' ? 'API error' : 'Stop';
+    let stopped = 0;
+    if (BACKGROUND_AT_TURN_END === 'stop') stopped = tasks.stopAll(HALT_TURN);
+    const left = tasks.running().length - stopped;
+    turnEnded = { at: Date.now(), why, stopped, left };
+    journal.append({ kind: 'turn', summary: `ended (${why})${stopped ? `; ${stopped} background run(s) stopped` : ''}${left > 0 ? `; ${left} left running` : ''}` });
+    if (driver.proc) bannerStatus('');
+    return text(`noted: turn ended (${why}).${stopped ? ` ${stopped} background run(s) will stop after their current step.` : ''}`);
   },
 
   // The clipboard is how text leaves an app that will not expose it any other
@@ -1163,13 +1281,17 @@ async function act(op, args, describe) {
   if (!check.ok) return failCheck(check);
   const elsewhere = offDesktopCheck(win);
   if (elsewhere) return elsewhere;
+  const locked = await lockedCheck();
+  if (locked) return locked;
 
   const hwnd = Number(win.hwnd);
+  lastActedHwnd = hwnd;
   let named = targetName(args, hwnd);
   // A click by automation id or by point has no name on this side; the host
   // is asked what it is about to press, so a Send button is still a Send
-  // button whichever way it was named.
-  if (op === 'click' && !named && CONFIRM_ENABLED && args.confirmed !== true && (args.selector || args.point)) {
+  // button whichever way it was named - and a hand-off step is still one
+  // with confirmed:true, which is why this does not skip on it.
+  if (op === 'click' && !named && (args.selector || args.point)) {
     try {
       const { result } = await driver.call('describe', {
         hwnd, index: args.index, selector: args.selector, point: args.point, snapshot_id: args.snapshot_id,
@@ -1190,6 +1312,7 @@ async function act(op, args, describe) {
   // One session at a time gets to touch the pointer, the foreground window and
   // the keyboard. Reads never take the lease; everything here can end up
   // sending input, so all of it does.
+  bannerStatus(`${VERB[op] || op} in ${appWord(win)}`);
   const call = await sessions.withInput(op, { hwnd, title: win.title },
     () => driver.call(op, payload));
   const { result } = call;
@@ -1261,6 +1384,68 @@ function errorResult(err) {
   return fail('internal', err && err.message ? err.message : String(err), null);
 }
 
+// One line per call into the journal: what was asked, where, and the first
+// line of the answer. Clipboard contents never go in, typed text is cut
+// short, and a blocked window never got as far as producing text.
+const JOURNAL_SKIP = new Set(['computer_status', 'computer_recap', 'computer_turn_ended', 'computer_task', 'computer_apps']);
+const NOTICE_LINE = /^\[(user active|\d+ other Claude|your previous turn|background task)/;
+
+function journalCall(name, args, result) {
+  if (JOURNAL_SKIP.has(name) || !name) return;
+  const kind = name.replace(/^computer_/, '');
+  const a = args || {};
+  const sel = (s) => s && JSON.stringify(s.name || s.automation_id || s.role || '');
+  let what = '';
+  switch (kind) {
+    case 'click': case 'scroll':
+      what = a.index != null ? `[${a.index}]` : a.selector ? sel(a.selector) : a.point ? `(${a.point.join(',')})` : ''; break;
+    case 'type':
+      what = `${a.index != null ? `[${a.index}] ` : ''}${JSON.stringify(String(a.text || '').slice(0, 24))}`; break;
+    case 'key': what = String(a.keys || ''); break;
+    case 'snapshot':
+      what = a.find ? `find ${JSON.stringify(String(a.find))}` : a.index != null ? `[${a.index}]` : a.full ? 'full' : ''; break;
+    case 'run': what = `${Array.isArray(a.steps) ? a.steps.length : 0} steps${a.background ? ' (background)' : ''}`; break;
+    case 'launch': what = String(a.app || ''); break;
+    case 'grant': what = a.revoke ? `revoke ${a.revoke}` : ''; break;
+    case 'wait_for':
+      what = a.text ? `text ${JSON.stringify(String(a.text))}` : a.change ? 'change' : a.new_window ? 'new window' : a.selector ? sel(a.selector) : ''; break;
+    case 'clipboard': what = a.text != null ? 'set' : 'read'; break;
+  }
+  const quiet = kind === 'clipboard';
+  const first = quiet ? '' : (bodyOf(result).split('\n').find((l) => l.trim() && !NOTICE_LINE.test(l.trim())) || '');
+  const hwnd = a.hwnd != null ? Number(a.hwnd) : (kind === 'click' || kind === 'type' || kind === 'key' || kind === 'scroll' ? lastActedHwnd : null);
+  const win = hwnd ? windowCache.get(hwnd) : null;
+  journal.append({
+    kind,
+    hwnd: hwnd || undefined,
+    title: win ? win.title : (a.title ? String(a.title) : undefined),
+    app: win ? policy.key(win) : undefined,
+    ok: !(result && result.isError),
+    code: (result && result.code) || undefined,
+    summary: `${what}${what ? ' ' : ''}${first ? `-> ${first.replace(/\s+/g, ' ').slice(0, 140)}` : ''}`.trim(),
+  });
+}
+
+// Said once, at the top of the next result: the turn ended, and any
+// background run that finished since the last time anyone looked. This is the
+// "absorb the result when it returns" half of async tool calling without a
+// second tool primitive: the model gets the news on whatever it calls next.
+function withNotices(result, name, args) {
+  const notes = [];
+  if (turnEnded) {
+    const t = turnEnded;
+    turnEnded = null;
+    notes.push(`[your previous turn ended (${t.why})${t.stopped ? `; ${t.stopped} background run(s) stopped after their current step` : ''}${t.left > 0 ? `; ${t.left} still running` : ''}]`);
+  }
+  for (const t of tasks.takeFinished()) {
+    notes.push(`[background task ${t.id} ${t.status}: ${t.done}/${t.total} steps on "${t.title}" - computer_task { id: "${t.id}" } for the results]`);
+  }
+  if (!notes.length) return result;
+  const c = result && result.content;
+  if (!c || !c.length || c[0].type !== 'text') return result;
+  return { ...result, content: [{ type: 'text', text: notes.join('\n') + '\n' + c[0].text }, ...c.slice(1)] };
+}
+
 async function handleMessage(msg) {
   const { id, method, params } = msg;
 
@@ -1290,13 +1475,20 @@ async function handleMessage(msg) {
     // Every call is a heartbeat, so a session that only reads for half an hour
     // is not pruned from the registry as abandoned.
     sessions.heartbeat();
+    let result;
     try {
-      const result = await fn(args);
-      await syncSessionUi();
-      reply(id, result);
+      result = await fn(args);
     } catch (err) {
-      reply(id, errorResult(err));
+      result = errorResult(err);
     }
+    if (name !== 'computer_turn_ended') {
+      journalCall(name, args, result);
+      result = withNotices(result, name, args);
+      // Between calls the model is thinking; the banner says so.
+      bannerStatus('thinking');
+    }
+    try { await syncSessionUi(); } catch { /* cosmetic */ }
+    reply(id, result);
     return;
   }
 

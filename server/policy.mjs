@@ -22,7 +22,27 @@ const BLOCKED = [
   // Security tooling, and the Windows Security app itself (SecurityHealthUI),
   // which Codex refuses too: an agent must never turn protection off.
   'mmc', 'secpol', 'gpedit', 'certmgr', 'bitlockerwizard', 'securityhealth',
+  // The lock screen. A locked desktop is the user's, full stop; Codex stops
+  // and asks them to unlock, and so does this.
+  'lockapp',
+  // AI assistants' own desktop apps. Codex refuses to drive the ChatGPT app
+  // and its own UI; reading a Claude window is the loop-back the session
+  // exclusion exists to prevent, so the desktop apps are out too.
+  'claude', 'chatgpt', 'codex',
+  // Authenticators and wallets: one-time codes and seed phrases, in plain text.
+  'authenticator', 'authy', 'winauth', 'ledger', 'exodus', 'electrum', 'trezor',
 ];
+
+// The lock screen and the logon UI, when either owns a visible window, mean the
+// desktop is not the user's to lend right now.
+export function desktopLocked(windows) {
+  for (const w of windows || []) {
+    if (w.minimized) continue;
+    const p = normalise(w.process);
+    if (p === 'lockapp' || p === 'logonui') return w;
+  }
+  return null;
+}
 
 // Actable only after a grant that spells out what it covers. These reach far
 // past their own window: a browser holds every logged-in session, a file
@@ -45,6 +65,16 @@ const SENSITIVE = {
   'slack':           'A messaging app can post as you in shared channels.',
   'teams':           'A messaging app can post as you in shared channels.',
   'discord':         'A messaging app can post as you in shared channels.',
+  // Remote desktop clients relay every click and keystroke to another machine,
+  // whose apps, tiers and grants this plugin cannot see.
+  'mstsc':           'A remote desktop client relays every click and keystroke to another machine.',
+  'msrdc':           'A remote desktop client relays every click and keystroke to another machine.',
+  'anydesk':         'A remote desktop client relays every click and keystroke to another machine.',
+  'teamviewer':      'A remote desktop client relays every click and keystroke to another machine.',
+  'rustdesk':        'A remote desktop client relays every click and keystroke to another machine.',
+  'parsec':          'A remote desktop client relays every click and keystroke to another machine.',
+  'vncviewer':       'A remote desktop client relays every click and keystroke to another machine.',
+  'tvnviewer':       'A remote desktop client relays every click and keystroke to another machine.',
 };
 
 // Shell-equivalent surfaces. Anything typed into these runs as you, so Computer Use
@@ -175,13 +205,48 @@ const CONSEQUENTIAL = new RegExp([
   // and cancelling something that was booked or paid for
   String.raw`|\b(install|cancel\s+(order|subscription|appointment|reservation|booking|plan)`,
   String.raw`|(change|reset)\s+password|(grant|allow)\s+access)\b`,
+  // The rest of Codex's "always confirm" list (its confirmations policy, Sep
+  // 2026 build): accounts and persistent access, saved secrets, newly acquired
+  // software, sharing and permissions, bookings, and forms that carry a
+  // person's details.
+  String.raw`|\b(sign\s+up|create\s+(my\s+|an?\s+|your\s+)?account|register\s+now|unsubscribe`,
+  String.raw`|save\s+(password|passwords|card|payment|payment\s+method)|remember\s+(this\s+|my\s+)?(card|password)`,
+  String.raw`|(create|generate|issue|new)\s+(api\s+|access\s+|personal\s+access\s+)?(key|token|secret)`,
+  String.raw`|add\s+(to\s+)?(chrome|edge|firefox|brave|browser)|add\s+extension|install\s+extension`,
+  String.raw`|(run|open|keep|allow|download)\s+anyway|make\s+public|change\s+permissions|manage\s+access|share\s+with`,
+  String.raw`|book\s+(appointment|table|now)|reserve|schedule\s+(appointment|meeting|visit)`,
+  String.raw`|apply\s+now|submit\s+(request|claim|return|review|rating)|accept\s+invitation)\b`,
+].join(''), 'i');
+
+// Social reactions and shares, which Codex confirms too. Anchored at the start
+// of the name: a button is called "Like" or "Follow"; a heading that happens to
+// contain the word is not a button. "Reply" is not here: it opens a draft, and
+// the point of no return is the Send that follows.
+const SOCIAL = /^\s*(like|unlike|follow|unfollow|react|retweet|repost|share|comment|post\s+comment|add\s+comment)\b/i;
+
+// Things the user has to do themselves. Codex's hand-off mode, plus the two
+// Anthropic rules that are never negotiable: no CAPTCHAs and no age
+// verification. Not confirmable - confirmed:true does not lift these.
+const HANDOFF = new RegExp([
+  String.raw`\b(i\s*'?\s*a?m\s+(over|at\s+least)\s+(18|21)|confirm\s+(my\s+|your\s+)?age|verify\s+(my\s+|your\s+)?age|age\s+verification`,
+  String.raw`|i\s*'?\s*m\s+not\s+a\s+robot|solve\s+(the\s+)?captcha|verify\s+you\s+are\s+human|human\s+verification`,
+  String.raw`|proceed\s+anyway|accept\s+the\s+risk|continue\s+to\s+(the\s+)?(site|page|website)\s*\(unsafe\)|go\s+on\s+to\s+the\s+(web)?page|unsafe\s+to\s+continue`,
+  String.raw`|bypass\s+paywall|disable\s+(protection|antivirus|firewall|defender)|turn\s+off\s+(real-?time\s+)?protection)\b`,
 ].join(''), 'i');
 
 // True when a control's name says pressing it has consequences the user should
 // have been asked about first.
 export function isConsequential(name) {
   if (!name) return false;
-  return CONSEQUENTIAL.test(String(name));
+  const s = String(name);
+  return CONSEQUENTIAL.test(s) || SOCIAL.test(s);
+}
+
+// True when a control's name says this step is the user's to take, not an
+// agent's, whatever they have said so far.
+export function isHandOff(name) {
+  if (!name) return false;
+  return HANDOFF.test(String(name));
 }
 
 // Do two window rectangles share any pixels? Unknown geometry counts as
