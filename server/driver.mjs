@@ -33,80 +33,59 @@ export class Driver {
   }
 
   async start() {
-    if (this.proc && !this.proc.killed) return this.info;
-    // Two callers racing at startup must share one spawn, not spawn twice.
     if (this.starting) return this.starting;
+    if (this.proc && !this.proc.killed && this.info) return this.info;
+    // Defer launch until the shared promise is assigned, even for sync failures.
+    const attempt = Promise.resolve().then(() => this._launch());
+    this.starting = attempt;
+    try { return await attempt; }
+    finally { if (this.starting === attempt) this.starting = null; }
+  }
 
-    this.starting = new Promise((resolve, reject) => {
+  _launch() {
+    return new Promise((resolve, reject) => {
       let exe;
-      try {
-        exe = ensureHost({ log: this.onLog }).exe;
-      } catch (err) {
-        this.starting = null;
-        reject(new HostError(err.code || 'build_failed', err.message, err.hint));
-        return;
-      }
-
+      try { exe = ensureHost({ log: this.onLog }).exe; }
+      catch (err) { reject(new HostError(err.code || 'build_failed', err.message, err.hint)); return; }
       const proc = spawn(exe, [], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
         env: this.env ? { ...process.env, ...this.env } : process.env,
       });
       this.proc = proc;
-
-      const rl = createInterface({ input: proc.stdout });
-      rl.on('line', (line) => this._onLine(line));
-
-      // A write to a pipe whose reader has gone emits an async 'error' on the
-      // stream. Unhandled, that takes the whole MCP server down with it, so it
-      // is logged here and left for the per-call timeout or exit handler.
-      proc.stdin.on('error', (err) => this.onLog('host stdin: ' + err.message));
-
-      proc.stderr.on('data', (d) => {
-        const s = d.toString();
-        this.stderr.push(s);
-        if (this.stderr.length > 50) this.stderr.shift();
-        this.onLog('host stderr: ' + s.trim());
-      });
-
-      const settleFail = (err) => {
-        this.starting = null;
-        this._failAll(err);
-        reject(err);
+      let settled = false;
+      let bootTimer;
+      const fail = (err) => {
+        clearTimeout(bootTimer);
+        if (this.proc === proc) {
+          this.proc = null; this.info = null; this.ready = null;
+          this._failAll(err);
+        }
+        if (!settled) { settled = true; reject(err); }
       };
-
-      proc.on('error', (err) =>
-        settleFail(new HostError('host_spawn_failed', `Could not start ${exe}: ${err.message}`,
-          'Try a forced rebuild: node server/build.mjs --force'))
-      );
-
-      proc.on('exit', (code, signal) => {
-        const err = new HostError(
-          'host_exited',
-          `Host process exited (code=${code} signal=${signal}). ${this.stderr.join('').slice(-500)}`,
-          'The next call will start a fresh host.'
-        );
-        this._failAll(err);
-        this.proc = null;
-        this.info = null;
-        this.starting = null;
+      createInterface({ input: proc.stdout }).on('line', line => { if (this.proc === proc) this._onLine(line); });
+      proc.stdin.on('error', err => this.onLog('host stdin: ' + err.message));
+      proc.stderr.on('data', d => {
+        this.stderr.push(d.toString());
+        if (this.stderr.length > 50) this.stderr.shift();
+        this.onLog('host stderr: ' + d.toString().trim());
       });
-
-      const bootTimer = setTimeout(() => {
-        settleFail(new HostError('host_timeout', 'Host did not report ready within 20s.',
+      proc.on('error', err => fail(new HostError('host_spawn_failed', err.message,
+        'Try a forced rebuild: node server/build.mjs --force')));
+      proc.on('exit', (code, signal) => fail(new HostError('host_exited',
+        'Host process exited (code=' + code + ' signal=' + signal + ').',
+        'The next call will start a fresh host.')));
+      bootTimer = setTimeout(() => {
+        fail(new HostError('host_timeout', 'Host did not report ready within 20s.',
           this.stderr.join('').slice(-500) || 'Try a forced rebuild: node server/build.mjs --force'));
         try { proc.kill(); } catch {}
       }, 20000);
-
-      this.ready = (info) => {
-        clearTimeout(bootTimer);
-        this.info = info;
-        this.starting = null;
+      this.ready = info => {
+        if (settled || this.proc !== proc) return;
+        settled = true; clearTimeout(bootTimer);
+        this.info = info; this.ready = null;
         resolve(info);
       };
     });
-
-    return this.starting;
   }
 
   _onLine(line) {
