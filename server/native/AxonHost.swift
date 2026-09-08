@@ -273,7 +273,12 @@ func elementAt(_ x: Int, _ y: Int) -> AXUIElement? {
 
 final class WindowRegistry {
     private var entries: [Int: (el: AXUIElement, pid: pid_t)] = [:]
-    private var next = 1
+    // Seeded from this process's pid rather than starting at 1, so a handle
+    // number minted by a host that has since restarted (a client's cached
+    // hwnd, from before the restart) cannot coincide with one this process
+    // mints - see resolveWindow, which refuses a handle it never minted
+    // rather than matching whatever a fresh enumeration numbers the same.
+    private var next = Int(ProcessInfo.processInfo.processIdentifier) << 16
     private let lock = NSLock()
 
     func handle(for el: AXUIElement, pid: pid_t) -> Int {
@@ -335,6 +340,9 @@ final class Snapshot {
     var pid: pid_t = 0
     var title: String = ""
     var taken = Date()
+    // The window this snapshot was taken of, so snapshotElement can refuse to
+    // hand out an element from some other window - see there.
+    var handle: Int = 0
 }
 
 var snapshots: [String: Snapshot] = [:]
@@ -423,10 +431,17 @@ func resolveWindow(_ a: [String: Any]) throws -> (AXUIElement, pid_t, String, In
     if wantHandle > 0, let hit = registry.lookup(wantHandle) {
         return (hit.0, hit.1, axString(hit.0, kAXTitleAttribute as String) ?? "", wantHandle)
     }
+    // A handle is only ever minted by enumerateWindows(), so any hwnd the
+    // caller could legitimately know about was already in the registry
+    // above; matching it again here by whatever number this fresh walk
+    // happens to hand out is how a stale handle from a host that has since
+    // restarted used to land on an unrelated window (registry.next now
+    // starts from a per-process base specifically to make that collision
+    // vanishingly unlikely too - this refusal is the other half of that
+    // fix). An unknown hwnd falls through to window_not_found below.
     let wantTitle = str(a["title"])
     var partial: (AXUIElement, pid_t, String, Int)? = nil
     for w in enumerateWindows() {
-        if wantHandle > 0 && w.handle == wantHandle { return (w.el, w.pid, w.title, w.handle) }
         if let t = wantTitle {
             if w.title == t { return (w.el, w.pid, w.title, w.handle) }
             if partial == nil && w.title.lowercased().contains(t.lowercased()) {
@@ -513,6 +528,7 @@ func opSnapshot(_ a: [String: Any]) throws -> [String: Any] {
         snap.elements = elements
         snap.pid = pid
         snap.title = title
+        snap.handle = handle
         snapshots[sid!] = snap
     }
     while snapshots.count > maxSnapshots {
@@ -592,8 +608,24 @@ func snapshotElement(_ a: [String: Any]) throws -> (AXUIElement, pid_t) {
         }
         sid = "s\(snapSeq)"
     }
-    guard let snap = snapshots[sid] else {
+    guard var snap = snapshots[sid] else {
         throw AxonError("snapshot_expired", "Snapshot \(sid) is no longer held.", "Take a fresh snapshot.")
+    }
+    // The caller's window wins. An index resolved with no snapshot_id falls
+    // back to the newest snapshot taken of ANY window - if the model read a
+    // dialog or a second window after reading the one it means to act on,
+    // that snapshot, not the target's, would otherwise supply the element
+    // (the Windows host guards the same way in SnapshotElement). When the
+    // caller named a window, only a snapshot of that window may answer.
+    let wantHandle = int(a["hwnd"], -1)
+    if wantHandle > 0 && snap.handle != wantHandle {
+        guard let hit = snapshots.filter({ $0.value.handle == wantHandle }).max(by: { $0.value.taken < $1.value.taken }) else {
+            throw AxonError("snapshot_expired",
+                            "No snapshot of this window is held; the snapshot named (or the last one taken) belongs to a different window.",
+                            "Take a fresh snapshot of this window and use its indices.")
+        }
+        sid = hit.key
+        snap = hit.value
     }
     let idx = int(a["index"], -1)
     guard idx >= 0 && idx < snap.elements.count else {
@@ -930,8 +962,11 @@ func opScroll(_ a: [String: Any]) throws -> [String: Any] {
     }
     try checkStop()
 
+    // wheelCount tells CGEvent how many wheels to read: with 1, wheel2 is
+    // never looked at, so a horizontal scroll silently did nothing. wheel1
+    // is still 0 in that case, which is a harmless no-op vertical scroll.
     let ev = CGEvent(scrollWheelEvent2Source: src, units: .line,
-                     wheelCount: 1,
+                     wheelCount: 2,
                      wheel1: horizontal ? 0 : Int32(amount),
                      wheel2: horizontal ? Int32(amount) : 0,
                      wheel3: 0)

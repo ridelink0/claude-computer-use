@@ -2,7 +2,7 @@
 // and grant logic against synthetic window records, so every tier and every
 // refusal path is covered deterministically.
 
-import { Policy, classify, isConsequential, TIER } from '../server/policy.mjs';
+import { Policy, classify, isConsequential, TIER, looksLikeShellName, shellKeyReason } from '../server/policy.mjs';
 
 let pass = 0, fail = 0; const failures = [];
 const check = (n, c, d) => {
@@ -164,6 +164,39 @@ console.log('\n-- case and extension are normalised --');
 check('.exe suffix ignored', classify({ process: 'KEEPASS.EXE', path: '' }).tier === TIER.BLOCKED);
 check('path is used when process name is missing',
   classify({ process: null, path: 'C:\\x\\1password.exe' }).tier === TIER.BLOCKED);
+
+console.log('\n-- Start-menu display names that are really a shell --');
+{
+  // These are the names Get-StartApps actually returns for a shell, wrapped
+  // in ordinary words classify()'s exact match never sees before a process
+  // exists to judge - computer_launch refuses them by name, before spawning.
+  for (const n of ['Windows PowerShell', 'Windows PowerShell ISE', 'Command Prompt',
+    'Git Bash', 'Terminal', 'Node.js command prompt', 'code', 'cmd']) {
+    check(`"${n}" reads as a shell`, looksLikeShellName(n) === true);
+  }
+  for (const n of ['Spotify', 'Photoshop', 'Notepad', 'Microsoft Edge', 'Calculator', '']) {
+    check(`"${n}" does not`, looksLikeShellName(n) === false);
+  }
+}
+
+console.log('\n-- computer_key: which chords reach the shell is platform-specific --');
+{
+  // Windows: the Windows-key aliases open Start, Search, Run, Settings.
+  for (const k of ['win+r', 'Meta+d', 'windows+s', 'super+e', 'os+l']) {
+    check(`win32 refuses "${k}"`, shellKeyReason(k, 'win32') !== null, k);
+  }
+  for (const k of ['ctrl+s', 'alt+f4', 'ctrl+shift+t', 'f5', 'cmd+s']) {
+    check(`win32 allows "${k}"`, shellKeyReason(k, 'win32') === null, k);
+  }
+  // macOS: Command is the ordinary modifier for every app shortcut and must
+  // not be refused wholesale; only the chords that reach the shell itself are.
+  for (const k of ['cmd+s', 'cmd+l', 'command+c', 'cmd+shift+t', 'cmd+z', 'cmd+shift+z']) {
+    check(`darwin allows "${k}"`, shellKeyReason(k, 'darwin') === null, k);
+  }
+  for (const k of ['cmd+space', 'cmd+tab', 'shift+cmd+tab', 'cmd+option+esc', 'ctrl+cmd+q', 'cmd+shift+q']) {
+    check(`darwin refuses "${k}"`, shellKeyReason(k, 'darwin') !== null, k);
+  }
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) { console.log('failures: ' + failures.join(', ')); process.exit(1); }

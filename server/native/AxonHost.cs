@@ -2844,6 +2844,19 @@ namespace Axon
                             AddNowState(res, t.El);
                             return res;
                         }
+                        // background:true is a promise that the window is left alone.
+                        // Falling through to SetFocus + real keystrokes below would
+                        // break that promise silently - the caller asked for the
+                        // window not to be raised, and it would be raised anyway.
+                        // Refuse instead, the way the macOS host refuses with
+                        // background_unavailable rather than typing into whatever
+                        // is now in front.
+                        if (force)
+                        {
+                            throw new AxonError("background_unavailable",
+                                "That control ignored posted text, and background:true means it must not be focused or raised to type into instead.",
+                                "Retry without background, or focus the window yourself first, then use computer_type with no target and no replace.");
+                        }
                     }
                 }
                 // Focusing an element in a window that is not in front raises that

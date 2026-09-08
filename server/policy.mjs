@@ -198,6 +198,70 @@ export function classify(win) {
   return { tier: TIER.STANDARD, reason: null };
 }
 
+// A Start-menu display name ("Windows PowerShell", "Command Prompt", "Git
+// Bash") wraps a shell's process name in ordinary words that classify()'s
+// exact-name match never sees, because this runs before anything has
+// started and there is no process or window class to judge yet. This is the
+// looser, name-only check computer_launch needs so those names are refused
+// before anything is spawned, the way "code" and "cmd" already are once
+// classify() sees the resulting process.
+const SHELL_NAME_HINTS = ['command prompt', 'terminal', 'powershell', 'git bash'];
+export function looksLikeShellName(name) {
+  const n = normalise(name);
+  if (!n) return false;
+  if (SHELL_NAME_HINTS.some((h) => n.includes(h))) return true;
+  // Whole-word match only, so a short token like "sh" or "cmd" does not flag
+  // an unrelated app whose name merely contains those letters.
+  const words = n.split(/[^a-z0-9]+/).filter(Boolean);
+  return words.some((w) => SHELL_APPS.includes(w) || INTERPRETERS.includes(w));
+}
+
+// The Windows key opens Start, Search, Run and Settings - the shell by
+// another door - so chords using it are refused on Windows, the way Codex
+// refuses them. Command is the ordinary modifier for every macOS shortcut
+// (cmd+s, cmd+c, cmd+l...) and cannot be refused wholesale the same way;
+// only the macOS chords that reach the shell itself (Spotlight, the app
+// switcher, Force Quit, lock and log out) are refused there instead.
+const WIN_KEY_CHORD = /(^|\+)\s*(win|windows|meta|super|os)\s*(\+|$)/i;
+
+// cmd/command/meta/win all map to Command on the macOS host (AxonHost.swift
+// maps them identically), so they are folded together before a combo is
+// matched, and the modifiers may appear in any order in the typed chord.
+const MAC_CMD_ALIAS = /^(cmd|command|meta|win)$/i;
+const MAC_SHELL_COMBOS = [
+  ['cmd', 'space'],                   // Spotlight
+  ['cmd', 'tab'], ['cmd', 'shift', 'tab'], // application switcher
+  ['cmd', '`'],                       // window switcher within an app
+  ['cmd', 'option', 'esc'],           // Force Quit Applications
+  ['ctrl', 'cmd', 'q'],               // lock screen
+  ['cmd', 'shift', 'q'],              // log out
+  ['ctrl', 'up'], ['ctrl', 'down'],   // Mission Control / App Exposé
+];
+const MAC_SHELL_KEYS = new Set(MAC_SHELL_COMBOS.map((c) => [...c].sort().join('+')));
+
+function macChordKey(chord) {
+  return String(chord || '')
+    .split('+')
+    .map((p) => p.trim().toLowerCase())
+    .filter(Boolean)
+    .map((p) => (MAC_CMD_ALIAS.test(p) ? 'cmd' : p))
+    .sort()
+    .join('+');
+}
+
+// Refuses the key chords that reach the shell rather than an app. Returns
+// the refusal reason, or null when the chord may go through to the host.
+export function shellKeyReason(chord, platform = process.platform) {
+  if (platform === 'darwin') {
+    const key = macChordKey(chord);
+    return key && MAC_SHELL_KEYS.has(key)
+      ? 'That shortcut reaches the shell (Spotlight, the app switcher, Force Quit, or lock/log out) and is refused.'
+      : null;
+  }
+  return WIN_KEY_CHORD.test(String(chord || ''))
+    ? 'Windows-key shortcuts reach the shell (Start, Search, Run, Settings) and are refused.'
+    : null;
+}
 
 // Controls whose own label says the click leaves this machine or cannot be
 // taken back: money moves, a message is sent, something is destroyed. OpenAI's

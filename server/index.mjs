@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Driver, HostError } from './driver.mjs';
 import { dataDir } from './build.mjs';
-import { Policy, classify, isConsequential, isHandOff, desktopLocked, TIER } from './policy.mjs';
+import { Policy, classify, isConsequential, isHandOff, desktopLocked, TIER, looksLikeShellName, shellKeyReason } from './policy.mjs';
 import { renderSnapshot, renderApps, buildRows, renderDelta, diffRows, subtreeNodes, findMatcher, nodeMatches, leanNodes, probeWarning } from './render.mjs';
 import { profileHint } from './profiles.mjs';
 import { Sessions, LeaseBusy } from './sessions.mjs';
@@ -19,7 +19,7 @@ import { Tasks, validateSteps, HALT_TURN } from './tasks.mjs';
 import { Journal } from './journal.mjs';
 
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
-const SERVER_INFO = { name: 'computer-use', version: '0.6.0' };
+const SERVER_INFO = { name: 'computer-use', version: '0.7.0' };
 
 // Claude Code puts a server's instructions in front of the model at the start
 // of every session, before any tool schema has been loaded. For a deferred
@@ -108,7 +108,14 @@ async function takeAppshot(hwnd, { announce = true } = {}) {
   const check = policy.checkRead(win);
   if (!check.ok) throw new HostError(check.code, check.message, check.hint);
   if (DESKTOP_SCOPE === 'current' && win.other_desktop) throw new HostError('other_desktop', 'That window is on another virtual desktop.', null);
+  // This read is the user's doing, not the model's - it must not change which
+  // window an index-only click or a hwnd-less type resolves to next, so the
+  // state computer_snapshot updates as a side effect is saved and put back.
+  const savedSnapshotId = lastSnapshotId;
+  const savedRead = lastRead.get(Number(win.hwnd));
   const snap = await handlers.computer_snapshot({ hwnd: Number(win.hwnd), full: true, text_limit: 4000 });
+  lastSnapshotId = savedSnapshotId;
+  if (savedRead) lastRead.set(Number(win.hwnd), savedRead); else lastRead.delete(Number(win.hwnd));
   if (snap.isError) throw new HostError(snap.code || 'read_failed', bodyOf(snap), null);
   const body = bodyOf(snap);
   let image = null;
@@ -983,6 +990,9 @@ const handlers = {
     }
     const { tier, reason } = classify({ process: base, path: app, title: '' });
     if (tier === TIER.BLOCKED) return fail('app_blocked', reason, 'This is not configurable.');
+    if (tier === TIER.SHELL || looksLikeShellName(app)) {
+      return fail('app_blocked', 'That is a shell, or contains shell syntax.', 'Use the Bash tool for shell work.');
+    }
 
     // A Start-menu name ("Spotify", "Visual Studio Code") resolves through the
     // shell's app folder, which starts Store apps and shortcuts alike - the
@@ -991,6 +1001,13 @@ const handlers = {
     let startApp = null;
     if (process.platform === 'win32' && !/[\\/]/.test(app) && !/\.exe$/i.test(app)) {
       startApp = findStartApp(await startApps(), app);
+      // The typed name is checked above; the Start-menu entry it resolves to
+      // can still be a shell under a different display name than what was
+      // typed (findStartApp matches on a prefix/substring), so the resolved
+      // name is checked too before anything is spawned.
+      if (startApp && looksLikeShellName(startApp.name)) {
+        return fail('app_blocked', 'That is a shell, or contains shell syntax.', 'Use the Bash tool for shell work.');
+      }
     }
 
     const before = await windowSet();
@@ -1051,11 +1068,12 @@ const handlers = {
       + (r.covered ? ' That point is under another window, and some apps ignore a posted click they cannot see - check the result.' : ''));
   },
   async computer_key(args) {
-    // The Windows key opens Start, Search, Run and Settings: the shell by
-    // another door. Codex refuses these chords and so does this.
-    if (/(^|\+)\s*(win|windows|meta|super|cmd|command|os)\s*(\+|$)/i.test(String(args.keys || ''))) {
-      return fail('key_blocked', 'Windows-key shortcuts reach the shell (Start, Search, Run, Settings) and are refused.',
-        'Use the app\'s own shortcuts, or computer_launch to start an app.');
+    // Which chords reach the shell is platform-specific: see shellKeyReason
+    // in policy.mjs (the Windows key on win32, Spotlight/switcher/Force Quit
+    // chords on darwin - ordinary cmd+<key> shortcuts are not touched there).
+    const reason = shellKeyReason(args.keys);
+    if (reason) {
+      return fail('key_blocked', reason, 'Use the app\'s own shortcuts, or computer_launch to start an app.');
     }
     return act('key', args, (r) => `sent ${r.sent}.`);
   },
