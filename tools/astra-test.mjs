@@ -321,7 +321,7 @@ const c = client({ CU_PLUGIN_DATA: data, CU_CONFIRM: 'on' });
 try {
   await checkAsync('initialize and the two new tools are listed', async () => {
     const init = await c.send('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } });
-    assert.equal(init.result.serverInfo.version, '0.6.0');
+    assert.equal(init.result.serverInfo.version, '0.7.0');
     const list = await c.send('tools/list', {});
     const names = list.result.tools.map((t) => t.name);
     for (const n of ['computer_recap', 'computer_turn_ended', 'computer_drag', 'computer_appshot']) assert.ok(names.includes(n), n);
