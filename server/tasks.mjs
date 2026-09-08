@@ -15,7 +15,7 @@
 // toolset defines the contract followed here - run in order, stop at the first
 // failure, and report every step that did not run rather than dropping it.
 
-const STEP_KINDS = ['click', 'type', 'key', 'scroll', 'wait_for', 'snapshot', 'sleep', 'focus', 'drag'];
+const STEP_KINDS = ['click', 'type', 'key', 'scroll', 'wait_for', 'snapshot', 'sleep', 'focus', 'drag', 'paste'];
 
 // Per-step fields that change how a step runs rather than what it does.
 const STEP_EXTRAS = ['confirmed', 'mode', 'background', 'physical'];
@@ -54,6 +54,7 @@ export function parseStep(step, n) {
   if (kind === 'key' && typeof v === 'string') v = { keys: v };
   if (kind === 'sleep' && typeof v === 'number') v = { ms: v };
   if (kind === 'type' && typeof v === 'string') v = { text: v };
+  if (kind === 'paste' && typeof v === 'string') v = { text: v };
   if (kind === 'wait_for' && typeof v === 'string') v = { text: v };
   if (v === true || v == null) v = {};
   if (typeof v !== 'object') throw new Error(`step ${n}: ${kind} takes an object`);
@@ -165,6 +166,7 @@ function describeStep(kind, args) {
     case 'sleep': return `sleep ${args.ms}ms`;
     case 'focus': return 'focus';
     case 'drag': return `drag (${(args.from || []).join(',')})->(${(args.to || []).join(',')})`;
+    case 'paste': return `paste ${String(args.text || '').length} chars`;
   }
   return kind;
 }

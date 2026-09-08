@@ -71,6 +71,10 @@ namespace Axon
         [DllImport("user32.dll")] internal static extern bool IsWindowVisible(IntPtr h);
         [DllImport("user32.dll")] internal static extern bool IsWindow(IntPtr h);
         [DllImport("user32.dll")] internal static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+        // Which window, if any, currently has the clipboard open. An app reading
+        // the clipboard during a paste holds it for those few milliseconds, which
+        // is the only observable sign that the paste has actually been read.
+        [DllImport("user32.dll")] internal static extern IntPtr GetOpenClipboardWindow();
         [DllImport("user32.dll")] internal static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
         [DllImport("user32.dll")] internal static extern bool GetWindowRect(IntPtr h, out RECT r);
         [DllImport("user32.dll")] internal static extern bool AttachThreadInput(uint a, uint b, bool attach);
@@ -544,6 +548,7 @@ namespace Axon
                 case "wait_for": return OpWaitFor(a);
                 case "screenshot": return OpScreenshot(a);
                 case "clipboard": return OpClipboard(a);
+                case "paste": return OpPaste(a);
                 case "describe": return OpDescribe(a);
                 case "busy": return OpBusy(a);
                 case "banner": return OpBanner(a);
@@ -3302,6 +3307,99 @@ namespace Axon
             return res;
         }
 
+        // Runs one clipboard access on its own STA thread and waits for it - the
+        // clipboard is COM underneath and only usable from an STA thread, which
+        // this host's message loop is not. OpPaste's save and restore both go
+        // through here so a paste fails the same "another app is holding it
+        // open" way a plain clipboard read or write already does.
+        static void ClipboardSTA(System.Threading.ThreadStart body)
+        {
+            Exception failure = null;
+            System.Threading.Thread t = new System.Threading.Thread(delegate()
+            {
+                try { body(); }
+                catch (Exception ex) { failure = ex; }
+            });
+            t.SetApartmentState(System.Threading.ApartmentState.STA);
+            t.Start();
+            if (!t.Join(3000))
+                throw new AxonError("clipboard_busy", "The clipboard did not respond within 3s.",
+                    "Another application is holding it open. Retry in a moment.");
+            if (failure != null) throw new AxonError("clipboard_error", failure.Message, null);
+        }
+
+        // A paste that gives the clipboard back afterwards. computer_clipboard
+        // sets the clipboard and leaves it set - fine for reading a value out of
+        // an app, but every paste built on it would quietly destroy whatever the
+        // user had copied, which is the opposite of the "works while you work"
+        // claim this plugin makes. This saves what is already there, writes the
+        // given text, sends Ctrl+V, and puts the original back in a finally, so
+        // a failure partway through cannot leave the user's clipboard clobbered.
+        static object OpPaste(Dictionary<string, object> a)
+        {
+            string text = Str(Get(a, "text"));
+            if (text == null) throw new AxonError("bad_text", "paste needs text.", null);
+            Dictionary<string, object> res = new Dictionary<string, object>();
+            // Same gates as key/type with no element named: this types into
+            // whatever holds focus, so it goes through the same "is the user
+            // already in this window" and "bring it to the foreground" checks.
+            GuardSameWindow(a, HwndArg(a));
+
+            string saved = null;
+            bool hadText = false;
+            ClipboardSTA(delegate()
+            {
+                if (Clipboard.ContainsText()) { saved = Clipboard.GetText(); hadText = true; }
+            });
+
+            RequireForeground(HwndArg(a), a, res);
+
+            bool restored = false;
+            try
+            {
+                ClipboardSTA(delegate()
+                {
+                    if (text.Length == 0) Clipboard.Clear();
+                    else Clipboard.SetText(text);
+                });
+                bool held = Exclusive(a) && Native.BeginExclusive();
+                try
+                {
+                    System.Threading.Thread.Sleep(30);
+                    Native.KeyDown(VkOf("ctrl"));
+                    System.Threading.Thread.Sleep(8);
+                    Native.KeyTap(VkOf("v"));
+                    System.Threading.Thread.Sleep(8);
+                    Native.KeyUp(VkOf("ctrl"));
+                    // Give the target a moment to read the clipboard before the
+                    // finally below changes it out from under it - restoring too
+                    // early would make a slow app paste the user's old text back.
+                    System.Threading.Thread.Sleep(80);
+                }
+                finally { if (held) Native.EndExclusive(); }
+            }
+            finally
+            {
+                try
+                {
+                    ClipboardSTA(delegate()
+                    {
+                        if (hadText) Clipboard.SetText(saved);
+                        else Clipboard.Clear();
+                    });
+                    restored = true;
+                }
+                // Best-effort: the paste itself already happened by the time this
+                // runs, so a restore failure is reported in the result, not
+                // thrown over the top of a paste that otherwise succeeded.
+                catch { }
+            }
+
+            res["pasted"] = text.Length;
+            res["clipboard_restored"] = restored;
+            return res;
+        }
+
         // What a target is called, before acting on it - so a click by
         // selector or by point can be judged for consequences by name.
         static object OpDescribe(Dictionary<string, object> a)
@@ -3344,7 +3442,7 @@ namespace Axon
             switch (op)
             {
                 case "click": case "type": case "set_value": case "key": case "scroll":
-                case "focus": case "close_window": case "drag":
+                case "focus": case "close_window": case "drag": case "paste":
                     return true;
             }
             return false;

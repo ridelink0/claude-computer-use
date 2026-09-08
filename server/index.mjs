@@ -12,7 +12,7 @@ import path from 'node:path';
 import { Driver, HostError } from './driver.mjs';
 import { dataDir } from './build.mjs';
 import { Policy, classify, isConsequential, isHandOff, desktopLocked, TIER, looksLikeShellName, shellKeyReason } from './policy.mjs';
-import { renderSnapshot, renderApps, buildRows, renderDelta, diffRows, subtreeNodes, findMatcher, nodeMatches, leanNodes, probeWarning } from './render.mjs';
+import { renderSnapshot, renderApps, buildRows, renderDelta, diffRows, subtreeNodes, findMatcher, nodeMatches, leanNodes, probeWarning, blindTreeNote } from './render.mjs';
 import { profileHint } from './profiles.mjs';
 import { Sessions, LeaseBusy } from './sessions.mjs';
 import { Tasks, validateSteps, HALT_TURN } from './tasks.mjs';
@@ -82,7 +82,7 @@ function bannerStatus(s) {
   driver.call('banner', { text: t }, { timeoutMs: 2000 }).catch(() => {});
 }
 const appWord = (win) => String(win && win.process || '').replace(/\.exe$/i, '') || 'a window';
-const VERB = { click: 'clicking', type: 'typing', set_value: 'typing', key: 'pressing keys', scroll: 'scrolling', drag: 'dragging' };
+const VERB = { click: 'clicking', type: 'typing', set_value: 'typing', key: 'pressing keys', scroll: 'scrolling', drag: 'dragging', paste: 'pasting' };
 
 // Appshots. In the ChatGPT desktop app, both Command keys send the front
 // window - picture and text, including text outside the visible area - into
@@ -359,6 +359,11 @@ const TOOLS = [
     name: 'computer_clipboard',
     description: 'Read the clipboard text, or set it when text is given.',
     inputSchema: { type: 'object', properties: { text: str } },
+  },
+  {
+    name: 'computer_paste',
+    description: 'Ctrl+V text into whatever holds the keyboard focus without touching the user\'s clipboard: it is saved before the paste and restored after.',
+    inputSchema: { type: 'object', required: ['text'], properties: { text: str, hwnd: int, title: str } },
   },
   {
     name: 'computer_status',
@@ -893,7 +898,7 @@ const handlers = {
     // once; repeating them on every read cost more than the read.
     // ...and the safety monitor: rows that read like instructions to an agent
     // are named once, in front, as the page data they are.
-    body = presenceNote(await presence()) + injectionBanner(win) + probeWarning(shownRows) + body;
+    body = presenceNote(await presence()) + injectionBanner(win) + blindTreeNote(result) + probeWarning(shownRows) + body;
     bannerStatus('reading ' + appWord(win));
 
     const content = [{ type: 'text', text: body }];
@@ -1086,6 +1091,11 @@ const handlers = {
       return act('set_value', args, (r) => `set field via ${r.method}${r.normalised_by_app ? ' (app normalised it)' : ''}.`);
     }
     return act('type', args, (r) => `typed ${r.typed} characters${r.background ? ` via ${r.method} (window left where it was)` : ''}.`);
+  },
+
+  async computer_paste(args) {
+    return act('paste', args, (r) => `pasted ${r.pasted} characters via Ctrl+V.`
+      + (r.clipboard_restored ? ' Clipboard restored to what it held before.' : ' WARNING: could not restore the user\'s previous clipboard contents.'));
   },
 
   async computer_wait_for(args) {
@@ -1438,6 +1448,7 @@ const STEP_HANDLERS = {
   wait_for: (a) => handlers.computer_wait_for(a),
   snapshot: (a) => handlers.computer_snapshot(a),
   focus: (a) => handlers.computer_focus(a),
+  paste: (a) => handlers.computer_paste(a),
 };
 
 // Every input-sending tool funnels through one gate, so there is exactly one
@@ -1445,7 +1456,7 @@ const STEP_HANDLERS = {
 // Ops that act on a specific control rather than on whatever has focus.
 const NEEDS_ELEMENT = new Set(['click', 'set_value']);
 // Ops after which a window may have appeared - a dialog, a prompt, a picker.
-const OPENS_WINDOWS = new Set(['click', 'key', 'type', 'set_value']);
+const OPENS_WINDOWS = new Set(['click', 'key', 'type', 'set_value', 'paste']);
 
 async function act(op, args, describe) {
   // Validate the target before resolving a window, so a call with no target at
@@ -1603,11 +1614,15 @@ function journalCall(name, args, result) {
     case 'wait_for':
       what = a.text ? `text ${JSON.stringify(String(a.text))}` : a.change ? 'change' : a.new_window ? 'new window' : a.selector ? sel(a.selector) : ''; break;
     case 'clipboard': what = a.text != null ? 'set' : 'read'; break;
+    case 'paste': what = `${String(a.text || '').length} chars`; break;
     case 'drag': what = `(${(a.from || []).join(',')})->(${(a.to || []).join(',')})`; break;
   }
-  const quiet = kind === 'clipboard';
+  // Pasted text rides through the same clipboard the user's own copies do, so
+  // it gets the same privacy treatment as computer_clipboard: length only,
+  // never content.
+  const quiet = kind === 'clipboard' || kind === 'paste';
   const first = quiet ? '' : (bodyOf(result).split('\n').find((l) => l.trim() && !NOTICE_LINE.test(l.trim())) || '');
-  const hwnd = a.hwnd != null ? Number(a.hwnd) : (kind === 'click' || kind === 'type' || kind === 'key' || kind === 'scroll' ? lastActedHwnd : null);
+  const hwnd = a.hwnd != null ? Number(a.hwnd) : (kind === 'click' || kind === 'type' || kind === 'key' || kind === 'scroll' || kind === 'paste' ? lastActedHwnd : null);
   const win = hwnd ? windowCache.get(hwnd) : null;
   journal.append({
     kind,

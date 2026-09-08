@@ -149,6 +149,21 @@ export function nodeMatches(n, matcher) {
   return matcher.test(flat(n.name)) || matcher.test(flat(n.text)) || matcher.test(n.aid || '') || matcher.test(n.role || '');
 }
 
+// Whether a node survives into the listing at all. A node with no name, no
+// automation id, no text and nothing to act on tells the model nothing, so it
+// is dropped - and so is a Text node holding only a bullet or a dash. This
+// lives in one function because blindTreeNote decides "the tree came back with
+// nothing in it" from the same rule: if the two ever drifted apart, the note
+// and the listing under it would contradict each other.
+function describable(n) {
+  const acts = (n.patterns || []).some((p) => ACTIONABLE.has(p));
+  const name = flat(n.name);
+  const txt = flat(n.text);
+  if (!name && !n.aid && !txt && !acts) return false;
+  if (n.role === 'Text' && !n.aid && !acts && SEPARATOR.test(name) && !txt) return false;
+  return true;
+}
+
 // The per-element lines, before any header. Each row carries its stable
 // index so a later read can be compared against this one row by row.
 export function buildRows(snap, { textLimit = 200, withRects = false, chrome = false, nodes: only = null } = {}) {
@@ -182,9 +197,7 @@ export function buildRows(snap, { textLimit = 200, withRects = false, chrome = f
     const name = flat(n.name);
     const txt = flat(n.text);
     if (st.focused && n.role !== 'Window' && n.role !== 'Pane') focus = `focus [${n.i}] ${n.role}${name ? ` "${oneLine(name, 40)}"` : ''}`;
-    const bare = !name && !n.aid && !txt && acts.length === 0;
-    if (bare) { pruned++; continue; }
-    if (n.role === 'Text' && !n.aid && acts.length === 0 && SEPARATOR.test(name) && !txt) { pruned++; continue; }
+    if (!describable(n)) { pruned++; continue; }
 
     while (shown.length && shown[shown.length - 1] >= n.depth) shown.pop();
     const indent = '  '.repeat(Math.min(shown.length, 8));
@@ -241,6 +254,73 @@ function truncationNote(snap) {
   if (snap.time_budget_ms) return `TRUNCATED after ${snap.time_budget_ms}ms - slow tree; use interactive_only or a smaller window`;
   if (snap.truncated) return 'TRUNCATED (raise max_nodes or use interactive_only)';
   return '';
+}
+
+// Accessibility is opt-in at both the application and the OS, and the "off"
+// state looks exactly like "this app has no UI": the API connects, the window
+// is found, the tree comes back with nothing usable in it, and nothing reports
+// an error. That silence is the worst property a tree-driven design has, so it
+// is named here instead of being handed back as an empty listing.
+//
+// "Nothing usable" is decided with describable(), the same rule buildRows uses
+// to drop a row, because the question this answers is about what the reader
+// ends up seeing, not how many nodes the walk happened to return. A window
+// with forty unnamed wrapper panes and one canvas is exactly as blind as a
+// window with one node, and both are missed by a count.
+//
+// The causes are told apart by what did come back:
+//   - a Chromium/Electron window with no Document node at all: the renderer
+//     never turned its accessibility bridge on, so only the app's own frame is
+//     here (measured elsewhere: VS Code is 1 node without
+//     --force-renderer-accessibility and 140 with it);
+//   - a Chromium window that does have a Document but nothing under it: the
+//     bridge is on and the page itself paints into a canvas - Figma, Google
+//     Docs, a WebGL app - so no flag will help;
+//   - a native window whose content is an unnamed Custom, Image, Pane or Group
+//     and nothing else: canvas, WebGL, DirectX, video, a remote-desktop
+//     client. A custom control whose author never implemented accessibility
+//     looks identical from here, so the note says so rather than guessing.
+// Every case ends at computer_screenshot, because a picture is the only thing
+// that helps once the tree is blind.
+const SCREENSHOT = 'computer_screenshot { hwnd } is the way to see what is actually there.';
+const SURFACE_ROLES = new Set(['Custom', 'Image', 'Pane', 'Group']);
+
+export function blindTreeNote(snap) {
+  const nodes = snap.nodes || [];
+  if (!nodes.length) return '';
+  // A walk that ran out of nodes or out of time did not come back blind, it
+  // came back cut short, and truncationNote already says which.
+  if (snap.truncated || snap.time_budget_ms) return '';
+
+  if (snap.web) {
+    // Everything outside a Document is the browser's or the app's own frame,
+    // which is present whether or not the renderer is exposing the page.
+    const page = splitBrowser(nodes);
+    const doc = nodes.find((n) => n.role === 'Document');
+    if (!doc) {
+      return 'BLIND TREE: this is a Chromium or Electron window and no page is in its tree at all - only the application frame came back, which is what a renderer with accessibility switched off looks like, not an empty page. '
+        + 'Starting the app with --force-renderer-accessibility on its command line turns the renderer bridge on (Electron apps, including VS Code-based ones, take that flag). '
+        + `Until then, ${SCREENSHOT}\n\n`;
+    }
+    // The Document node itself only carries the URL, so it is no evidence that
+    // the page rendered; what counts is whether anything under it did.
+    if (!nodes.some((n) => page.has(n.i) && n.role !== 'Document' && describable(n))) {
+      return 'BLIND TREE: the page is in the tree but has nothing in it - the renderer bridge is on and the page still describes nothing, which is what a canvas-rendered web app (Figma, Google Docs, a WebGL or video surface) looks like. No command-line flag changes this. '
+        + `${SCREENSHOT}\n\n`;
+    }
+    return '';
+  }
+
+  const content = nodes.filter((n) => n.depth > 0);
+  if (content.some(describable)) return '';
+
+  const surface = content.find((n) => SURFACE_ROLES.has(n.role));
+  if (surface) {
+    return `BLIND TREE: [${surface.i}] ${surface.role} is all this window has, with no name, no value and nothing to act on - the shape of a canvas, WebGL, DirectX, video or remote-desktop surface that accessibility cannot describe. `
+      + `A custom control whose author never implemented accessibility looks exactly the same from here, so this cannot tell the two apart. ${SCREENSHOT}\n\n`;
+  }
+  return `BLIND TREE: ${content.length ? `${content.length} elements came back and not one has a name, a value or anything to act on` : 'nothing came back beneath the window itself'} - `
+    + `this window is either drawn without accessibility or still loading. ${SCREENSHOT}\n\n`;
 }
 
 function otherDesktopNote(snap) {

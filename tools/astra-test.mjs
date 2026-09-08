@@ -242,6 +242,83 @@ await checkAsync('drag is a step kind and validates like the others', async () =
   assert.equal(v.plan[0].target.hwnd, 55);
 });
 
+await checkAsync('paste is a step kind, takes the string shorthand, and validates like the others', async () => {
+  const { parseStep } = await import('../server/tasks.mjs');
+  const short = parseStep({ paste: 'hello' }, 1);
+  assert.equal(short.kind, 'paste');
+  assert.equal(short.args.text, 'hello');
+  const v = validateSteps([{ paste: { text: 'clip me' }, hwnd: 55 }], {});
+  assert.equal(v.errors.length, 0);
+  assert.equal(v.plan[0].target.hwnd, 55);
+  assert.equal(v.plan[0].args.text, 'clip me');
+});
+
+console.log('blind-tree detection');
+const { blindTreeNote } = await import('../server/render.mjs');
+
+check('an ordinary window with real content is not flagged', () => {
+  const snap = { nodes: [
+    { i: 0, depth: 0, role: 'Window', name: 'Notepad' },
+    { i: 1, depth: 1, role: 'Edit', name: '', text: 'some document text' },
+    { i: 2, depth: 1, role: 'MenuBar', name: 'Menu' },
+    { i: 3, depth: 2, role: 'MenuItem', name: 'File' },
+  ] };
+  assert.equal(blindTreeNote(snap), '');
+});
+
+check('Chromium window whose page never rendered into the tree is named, not silent', () => {
+  const snap = { web: true, nodes: [
+    { i: 0, depth: 0, role: 'Window', name: 'My Electron App' },
+    { i: 1, depth: 1, role: 'ToolBar', name: '' },
+  ] };
+  const note = blindTreeNote(snap);
+  assert.match(note, /BLIND TREE/);
+  assert.match(note, /--force-renderer-accessibility/);
+});
+
+check('Chromium window with an actual page tree is not flagged', () => {
+  const snap = { web: true, nodes: [
+    { i: 0, depth: 0, role: 'Window', name: 'Chrome' },
+    { i: 1, depth: 1, role: 'Document', text: 'https://example.com' },
+    { i: 2, depth: 2, role: 'Hyperlink', name: 'Home', text: 'https://example.com/' },
+  ] };
+  assert.equal(blindTreeNote(snap), '');
+});
+
+check('a lone unnamed custom-drawn surface is named as a canvas/WebGL/DirectX case', () => {
+  const snap = { nodes: [
+    { i: 0, depth: 0, role: 'Window', name: 'Some Game' },
+    { i: 1, depth: 1, role: 'Custom', name: '' },
+  ] };
+  const note = blindTreeNote(snap);
+  assert.match(note, /BLIND TREE/);
+  assert.match(note, /canvas/);
+});
+
+check('a custom node that actually has children is not flagged', () => {
+  const snap = { nodes: [
+    { i: 0, depth: 0, role: 'Window', name: 'App' },
+    { i: 1, depth: 1, role: 'Custom', name: '' },
+    { i: 2, depth: 2, role: 'Button', name: 'OK' },
+  ] };
+  assert.equal(blindTreeNote(snap), '');
+});
+
+check('a named custom control is not mistaken for a blind canvas', () => {
+  const snap = { nodes: [
+    { i: 0, depth: 0, role: 'Window', name: 'App' },
+    { i: 1, depth: 1, role: 'Custom', name: 'Color swatch' },
+  ] };
+  assert.equal(blindTreeNote(snap), '');
+});
+
+check('a window with nothing at all beneath it is flagged generically', () => {
+  const snap = { nodes: [{ i: 0, depth: 0, role: 'Window', name: 'Loading...' }] };
+  const note = blindTreeNote(snap);
+  assert.match(note, /BLIND TREE/);
+  assert.match(note, /computer_screenshot/);
+});
+
 console.log('hooks');
 const hooks = JSON.parse(fs.readFileSync(path.join(ROOT, 'hooks', 'hooks.json'), 'utf8')).hooks;
 const src = fs.readFileSync(path.join(ROOT, 'server', 'index.mjs'), 'utf8');
@@ -326,7 +403,9 @@ try {
     const names = list.result.tools.map((t) => t.name);
     for (const n of ['computer_recap', 'computer_turn_ended', 'computer_drag', 'computer_appshot']) assert.ok(names.includes(n), n);
     const chars = JSON.stringify(list.result.tools).length;
-    assert.ok(chars / 4 <= 3000, `schema ~${Math.round(chars / 4)} tokens`);
+    // Budget raised from 3000 to fit computer_paste's schema - one more
+    // always-on tool is worth the extra ~40 tokens paid on every call.
+    assert.ok(chars / 4 <= 3100, `schema ~${Math.round(chars / 4)} tokens`);
     console.log(`       schema ~${Math.round(chars / 4)} tokens`);
     const task = list.result.tools.find((t) => t.name === 'computer_task');
     assert.ok(task.inputSchema.properties.steps);
