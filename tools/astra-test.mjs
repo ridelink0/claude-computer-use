@@ -254,7 +254,7 @@ await checkAsync('paste is a step kind, takes the string shorthand, and validate
 });
 
 console.log('blind-tree detection');
-const { blindTreeNote } = await import('../server/render.mjs');
+const { blindTreeNote, buildRows } = await import('../server/render.mjs');
 
 check('an ordinary window with real content is not flagged', () => {
   const snap = { nodes: [
@@ -317,6 +317,146 @@ check('a window with nothing at all beneath it is flagged generically', () => {
   const note = blindTreeNote(snap);
   assert.match(note, /BLIND TREE/);
   assert.match(note, /computer_screenshot/);
+});
+
+// The dangerous failure is the false positive: a window with little UI told it
+// is blind sends the user after a problem that is not there. Each of these is a
+// real shape that reaches this function and must come back silent.
+
+check('a Chromium window with no Document but real chrome is not called blind', () => {
+  // A Chromium menu or popup, or Chrome's own task manager: same window class,
+  // never a Document, and full of usable controls.
+  const snap = { web: true, nodes: [
+    { i: 0, depth: 0, role: 'Window', name: '' },
+    { i: 1, depth: 1, role: 'Menu', name: '' },
+    { i: 2, depth: 2, role: 'MenuItem', name: 'Copy link address', patterns: ['Invoke'] },
+  ] };
+  assert.equal(blindTreeNote(snap), '');
+});
+
+check('a browser on a blank tab is not told to add --force-renderer-accessibility', () => {
+  const snap = { web: true, nodes: [
+    { i: 0, depth: 0, role: 'Window', name: 'New Tab - Chrome' },
+    { i: 1, depth: 1, role: 'TabItem', name: 'New Tab', patterns: ['SelectionItem'] },
+    { i: 2, depth: 1, role: 'Edit', name: 'Address and search bar', patterns: ['Value'] },
+  ] };
+  assert.equal(blindTreeNote(snap), '');
+});
+
+check('a canvas page in a real browser is still caught, chrome or no chrome', () => {
+  // The frame is describable and the page is not: judged on the page, or this
+  // case could never fire where canvas apps are actually used.
+  const snap = { web: true, nodes: [
+    { i: 0, depth: 0, role: 'Window', name: 'Figma - Chrome' },
+    { i: 1, depth: 1, role: 'TabItem', name: 'Figma', patterns: ['SelectionItem'] },
+    { i: 2, depth: 1, role: 'Document', text: 'https://figma.com/file/1' },
+    { i: 3, depth: 2, role: 'Group', name: '' },
+  ] };
+  const note = blindTreeNote(snap);
+  assert.match(note, /BLIND TREE/);
+  // Two causes look identical here, so it must name both and assert neither.
+  assert.match(note, /canvas/);
+  assert.match(note, /not finished rendering/);
+  assert.match(note, /nothing here can tell them apart/);
+});
+
+check('a window cloaked on another virtual desktop is not called blind', () => {
+  // Windows serves only the frame of a cloaked window. otherDesktopNote already
+  // says exactly that; a BLIND TREE note on top of it would be a wrong second
+  // diagnosis of a cause that is already known.
+  const snap = { other_desktop: true, nodes: [
+    { i: 0, depth: 0, role: 'Window', name: 'Slack' },
+    { i: 1, depth: 1, role: 'Pane', name: '' },
+  ] };
+  assert.equal(blindTreeNote(snap), '');
+});
+
+check('a bare unnamed Pane is not claimed to be a drawing surface', () => {
+  // Pane and Group are the wrappers every window has. Something is wrong, but
+  // nothing here knows what, so the note must claim no cause.
+  const snap = { nodes: [
+    { i: 0, depth: 0, role: 'Window', name: 'App' },
+    { i: 1, depth: 1, role: 'Pane', name: '' },
+  ] };
+  const note = blindTreeNote(snap);
+  assert.match(note, /BLIND TREE/);
+  assert.ok(!/canvas|WebGL|DirectX/.test(note), note);
+  assert.match(note, /nothing here can say which/);
+});
+
+check('the generic note counts in English', () => {
+  const one = blindTreeNote({ nodes: [
+    { i: 0, depth: 0, role: 'Window', name: 'App' },
+    { i: 1, depth: 1, role: 'Pane', name: '' },
+  ] });
+  assert.ok(!/1 elements/.test(one), one);
+});
+
+check('a truncated walk is left to truncationNote', () => {
+  const snap = { truncated: true, nodes: [
+    { i: 0, depth: 0, role: 'Window', name: 'App' },
+    { i: 1, depth: 1, role: 'Pane', name: '' },
+  ] };
+  assert.equal(blindTreeNote(snap), '');
+});
+
+check('the note and the listing under it agree on what counts as content', () => {
+  // blindTreeNote's whole claim is that it describes what the reader ended up
+  // seeing, which only holds while it and buildRows drop the same rows. A Text
+  // node holding one dash is the case where the two rules could quietly part:
+  // the listing prunes it, so the note has to call this window blind.
+  const snap = { nodes: [
+    { i: 0, depth: 0, role: 'Window', name: 'App' },
+    { i: 1, depth: 1, role: 'Text', name: '—' },
+  ] };
+  const built = buildRows(snap);
+  assert.equal(built.rows.length, 1, 'the listing shows the window and nothing under it');
+  assert.equal(built.pruned, 1, 'the dash was pruned');
+  assert.match(blindTreeNote(snap), /BLIND TREE/);
+});
+
+check('the paste restore puts back every clipboard format, not just text', () => {
+  // A source check, and said so plainly: OpPaste cannot be exercised without a
+  // real window and a real clipboard, which the test suite must not touch. What
+  // it can pin is the shape of the bug that has to stay fixed - a save/restore
+  // written against Clipboard.GetText/SetText looks correct, passes review, and
+  // silently destroys a copied image, a copied file, or formatted cells.
+  const cs = fs.readFileSync(path.join(ROOT, 'server', 'native', 'AxonHost.cs'), 'utf8');
+  const body = cs.slice(cs.indexOf('static object OpPaste('), cs.indexOf('static object OpDescribe('));
+  assert.ok(body.length > 200, 'found OpPaste');
+  assert.ok(/SaveClipboard\(out kept, out lost\)/.test(body), 'saves the whole data object, not the text');
+  assert.ok(!/Clipboard\.GetText\(\)/.test(body), 'no text-only save');
+  assert.ok(/finally/.test(body) && /RestoreClipboard\(saved, kept\)/.test(body), 'restores in a finally');
+  // Refuses rather than destroys when nothing could be copied out.
+  assert.ok(/kept == 0 && lost > 0/.test(body), 'refuses a paste it could not undo');
+  // And never puts the old contents back over a newer copy of the user's own.
+  assert.ok(/GetClipboardSequenceNumber/.test(body), 'notices the user copying mid-paste');
+  const save = cs.slice(cs.indexOf('static DataObject SaveClipboard('), cs.indexOf('static void RestoreClipboard('));
+  assert.ok(/GetFormats\(false\)/.test(save) && /SetData\(f, false, data\)/.test(save), 'copies every native format');
+});
+
+check('every op a tool dispatches exists in both hosts, or the tool is platform-gated', () => {
+  // computer_paste is the first tool with no Swift equivalent. Advertising it
+  // on macOS would mean a tool that is listed, costs schema tokens on every
+  // request, and fails at the host every single time. Whichever way that is
+  // resolved - paste implemented in Swift, or the tool kept off macOS - these
+  // two facts have to move together, so they are asserted together.
+  const idx = fs.readFileSync(path.join(ROOT, 'server', 'index.mjs'), 'utf8');
+  const swift = fs.readFileSync(path.join(ROOT, 'server', 'native', 'AxonHost.swift'), 'utf8');
+  const cs = fs.readFileSync(path.join(ROOT, 'server', 'native', 'AxonHost.cs'), 'utf8');
+  assert.ok(/case "paste": return OpPaste\(a\)/.test(cs), 'the C# host dispatches paste');
+  const swiftHasPaste = /case "paste"/.test(swift);
+  const gated = /TOOLS\.filter\(\(t\) => t\.name !== 'computer_paste'\)/.test(idx);
+  assert.ok(swiftHasPaste || gated, 'macOS has no paste op, so computer_paste must not be listed there');
+  assert.ok(!(swiftHasPaste && gated), 'the Swift host implements paste now - drop the platform gate in tools/list');
+});
+
+check('the note never claims to know which of two identical causes it is', () => {
+  const surface = blindTreeNote({ nodes: [
+    { i: 0, depth: 0, role: 'Window', name: 'Some Game' },
+    { i: 1, depth: 1, role: 'Custom', name: '' },
+  ] });
+  assert.match(surface, /cannot tell the two apart/);
 });
 
 console.log('hooks');
@@ -398,15 +538,44 @@ const c = client({ CU_PLUGIN_DATA: data, CU_CONFIRM: 'on' });
 try {
   await checkAsync('initialize and the two new tools are listed', async () => {
     const init = await c.send('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } });
-    assert.equal(init.result.serverInfo.version, '0.7.0');
+    // Against the manifest, not against a literal: a literal here has to be
+    // edited by the same hand that edits the manifest, which is exactly the
+    // hand that forgot last time (0.8.0 shipped manifests saying 0.8.0 and a
+    // server saying 0.7.0, and this assertion passed).
+    const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'plugin.json'), 'utf8'));
+    assert.equal(init.result.serverInfo.version, manifest.version);
+    const market = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8'));
+    assert.equal(market.plugins[0].version, manifest.version);
     const list = await c.send('tools/list', {});
     const names = list.result.tools.map((t) => t.name);
     for (const n of ['computer_recap', 'computer_turn_ended', 'computer_drag', 'computer_appshot']) assert.ok(names.includes(n), n);
+    // Windows only, and only while that is true of the host as well: see the
+    // paired check below.
+    assert.equal(names.includes('computer_paste'), process.platform === 'win32');
     const chars = JSON.stringify(list.result.tools).length;
-    // Budget raised from 3000 to fit computer_paste's schema - one more
-    // always-on tool is worth the extra ~40 tokens paid on every call.
-    assert.ok(chars / 4 <= 3100, `schema ~${Math.round(chars / 4)} tokens`);
-    console.log(`       schema ~${Math.round(chars / 4)} tokens`);
+    // Why there is a ceiling at all: this schema is not paid per use, it is
+    // paid per request. Every tool listed here is re-sent on every turn of
+    // every session the plugin is loaded into, whether or not the user ever
+    // touches a window, and it lands in the same context window the model
+    // needs for the snapshots. It is the one cost of this plugin that a user
+    // who never uses it still pays, which is why it is a test and not a note.
+    //
+    // Why it moved. computer_paste's own schema measures 81 tokens (name,
+    // description, three properties), and the listing was 2962 before it, so
+    // there was no trimming of computer_paste that fits it under 3000: its
+    // description is the only place its whole reason for existing - that it
+    // gives the clipboard back - is stated, and the alternative of folding
+    // paste into computer_clipboard would put an acting operation behind a
+    // read-shaped tool and past the gate that separates them. So the tool is
+    // worth its 81 tokens and the ceiling moves. The ceiling has now moved
+    // three times (2750, 3000, 3100), which is how a budget stops being one.
+    //
+    // So the slack is deliberately smaller than one tool costs: wording can be
+    // edited freely, and nothing new can be added without this line failing and
+    // the next person having to make the same argument in writing.
+    const tok = Math.round(chars / 4);
+    assert.ok(tok <= 3075, `schema ~${tok} tokens - over the always-on ceiling. Trim a description or argue the raise in the comment above; do not just move the number.`);
+    console.log(`       schema ~${tok} tokens (ceiling 3075)`);
     const task = list.result.tools.find((t) => t.name === 'computer_task');
     assert.ok(task.inputSchema.properties.steps);
   });

@@ -19,7 +19,11 @@ import { Tasks, validateSteps, HALT_TURN } from './tasks.mjs';
 import { Journal } from './journal.mjs';
 
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
-const SERVER_INFO = { name: 'computer-use', version: '0.7.0' };
+// Kept in step with .claude-plugin/plugin.json by hand, and by the test in
+// astra-test.mjs that reads that file - the 0.8.0 release bumped both manifests
+// and left this at 0.7.0, so the server told every client it was a version
+// behind the plugin the client had installed.
+const SERVER_INFO = { name: 'computer-use', version: '0.8.0' };
 
 // Claude Code puts a server's instructions in front of the model at the start
 // of every session, before any tool schema has been loaded. For a deferred
@@ -336,7 +340,7 @@ const TOOLS = [
   },
   {
     name: 'computer_run',
-    description: 'The normal way to act: a batch of steps in ONE call - click, type, key, scroll, wait_for, snapshot, sleep, focus - run in order, stopping at the first failure, ending with what changed. Use it for every sequence you can already name, e.g. steps: [{key:"ctrl+l"}, {type:"https://..."}, {key:"enter"}, {wait_for:{change:true}}]. A step may add hwnd, title or window:"new" to act on another window, optional:true to survive a failure, repeat:N to repeat. Steps pass the same gate a single call would.',
+    description: 'The normal way to act: a batch of steps in ONE call - click, type, paste, key, scroll, wait_for, snapshot, sleep, focus, drag - run in order, stopping at the first failure, ending with what changed. Use it for every sequence you can already name, e.g. steps: [{key:"ctrl+l"}, {type:"https://..."}, {key:"enter"}, {wait_for:{change:true}}]. A step may add hwnd, title or window:"new" to act on another window, optional:true to survive a failure, repeat:N to repeat. Steps pass the same gate a single call would.',
     inputSchema: { type: 'object', required: ['steps'], properties: {
       hwnd: int, title: str,
       steps: { type: 'array', items: { type: 'object' } },
@@ -1094,8 +1098,23 @@ const handlers = {
   },
 
   async computer_paste(args) {
-    return act('paste', args, (r) => `pasted ${r.pasted} characters via Ctrl+V.`
-      + (r.clipboard_restored ? ' Clipboard restored to what it held before.' : ' WARNING: could not restore the user\'s previous clipboard contents.'));
+    return act('paste', args, (r) => {
+      let out = `pasted ${r.pasted} characters via Ctrl+V.`;
+      // Whether the target actually took the keystroke is not knowable from
+      // here, so this reports what was observed and never more: seeing the
+      // target open the clipboard proves it read our text; not seeing it
+      // proves nothing either way, so it says nothing.
+      if (r.paste_read) out += ' The target read the clipboard, so the paste landed.';
+      if (r.clipboard_changed_by_user) {
+        out += ' The user copied something of their own during the paste, so their newer clipboard was left alone rather than overwritten with the older contents.';
+      } else if (r.clipboard_restored) {
+        out += ' Clipboard restored to what it held before.';
+        if (r.clipboard_formats_lost) out += ` (${r.clipboard_formats_lost} clipboard format(s) could not be copied and were not restored - tell the user.)`;
+      } else {
+        out += ' WARNING: could not restore the user\'s previous clipboard contents - tell them, they may need to copy it again.';
+      }
+      return out;
+    });
   },
 
   async computer_wait_for(args) {
@@ -1679,7 +1698,15 @@ async function handleMessage(msg) {
 
   if (method === 'ping') { reply(id, {}); return; }
 
-  if (method === 'tools/list') { reply(id, { tools: TOOLS }); return; }
+  // computer_paste is the one tool with no equivalent in the Swift host, so on
+  // macOS it would be advertised and then fail at the host every time. Better
+  // never to offer it there than to offer a tool that cannot work - and the
+  // schema it does not send is schema macOS does not pay for on every request.
+  if (method === 'tools/list') {
+    const tools = process.platform === 'win32' ? TOOLS : TOOLS.filter((t) => t.name !== 'computer_paste');
+    reply(id, { tools });
+    return;
+  }
 
   if (method === 'tools/call') {
     const name = params && params.name;

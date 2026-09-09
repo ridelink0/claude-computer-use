@@ -75,6 +75,9 @@ namespace Axon
         // the clipboard during a paste holds it for those few milliseconds, which
         // is the only observable sign that the paste has actually been read.
         [DllImport("user32.dll")] internal static extern IntPtr GetOpenClipboardWindow();
+        // Bumped by every clipboard WRITE and never by a read, so comparing it
+        // across a paste says whether anyone else copied while we were working.
+        [DllImport("user32.dll")] internal static extern uint GetClipboardSequenceNumber();
         [DllImport("user32.dll")] internal static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
         [DllImport("user32.dll")] internal static extern bool GetWindowRect(IntPtr h, out RECT r);
         [DllImport("user32.dll")] internal static extern bool AttachThreadInput(uint a, uint b, bool attach);
@@ -3321,11 +3324,77 @@ namespace Axon
                 catch (Exception ex) { failure = ex; }
             });
             t.SetApartmentState(System.Threading.ApartmentState.STA);
+            // A thread wedged on a clipboard some other app is holding must not
+            // keep this host alive after we have given up waiting for it.
+            t.IsBackground = true;
             t.Start();
             if (!t.Join(3000))
                 throw new AxonError("clipboard_busy", "The clipboard did not respond within 3s.",
                     "Another application is holding it open. Retry in a moment.");
             if (failure != null) throw new AxonError("clipboard_error", failure.Message, null);
+        }
+
+        // Everything on the clipboard, not just its text. Saving Clipboard.GetText()
+        // and restoring with SetText is the shape of this that looks right and
+        // silently destroys data: a user whose clipboard held a copied image, a
+        // file they were about to drop into a folder, or formatted spreadsheet
+        // cells would get back an empty clipboard and no warning. So every native
+        // format is copied out here and put back verbatim.
+        //
+        // The copy has to happen before our own text goes on, and it has to be a
+        // copy: the IDataObject the clipboard hands out is a live view of it, not
+        // a snapshot, so reading through it after the clipboard changes returns
+        // the new contents. `lost` counts formats the source would not hand over,
+        // so the caller can be told a restore was partial rather than told it
+        // worked.
+        //
+        // What comes out here never leaves the host: OpPaste reports counts and
+        // nothing else. That matters because a clipboard can hold a password a
+        // manager just put there, and the private formats those managers set
+        // ride along in the copy and go back untouched, so the paste does not
+        // strip the marker that keeps it out of clipboard history.
+        static DataObject SaveClipboard(out int kept, out int lost)
+        {
+            int nKept = 0, nLost = 0;
+            DataObject copy = new DataObject();
+            ClipboardSTA(delegate()
+            {
+                IDataObject src = Clipboard.GetDataObject();
+                if (src == null) return;
+                string[] formats;
+                // autoConvert false: the native formats only. Asking for the
+                // converted ones as well would save several spellings of the same
+                // data and put back more than was there.
+                try { formats = src.GetFormats(false); }
+                catch { formats = new string[0]; }
+                foreach (string f in formats)
+                {
+                    try
+                    {
+                        object data = src.GetData(f, false);
+                        if (data == null) { nLost++; continue; }
+                        copy.SetData(f, false, data);
+                        nKept++;
+                    }
+                    catch { nLost++; }
+                }
+            });
+            kept = nKept;
+            lost = nLost;
+            return copy;
+        }
+
+        static void RestoreClipboard(DataObject saved, int kept)
+        {
+            ClipboardSTA(delegate()
+            {
+                // Nothing was there to begin with, so an empty clipboard is the
+                // faithful restore.
+                if (kept == 0) Clipboard.Clear();
+                // copy:true flushes the data to the OLE clipboard, so what the
+                // user copied outlives this host process the way it did before.
+                else Clipboard.SetDataObject(saved, true);
+            });
         }
 
         // A paste that gives the clipboard back afterwards. computer_clipboard
@@ -3345,16 +3414,22 @@ namespace Axon
             // already in this window" and "bring it to the foreground" checks.
             GuardSameWindow(a, HwndArg(a));
 
-            string saved = null;
-            bool hadText = false;
-            ClipboardSTA(delegate()
-            {
-                if (Clipboard.ContainsText()) { saved = Clipboard.GetText(); hadText = true; }
-            });
+            int kept, lost;
+            DataObject saved = SaveClipboard(out kept, out lost);
+            // Something is on the clipboard and none of it could be copied out, so
+            // overwriting it now would destroy it with no way back. Refusing is
+            // the entire reason this operation exists, so it refuses instead of
+            // pasting and apologising afterwards.
+            if (kept == 0 && lost > 0)
+                throw new AxonError("clipboard_unsafe",
+                    "The clipboard holds " + lost.ToString(CultureInfo.InvariantCulture) + " format(s) that could not be copied, so a paste could not put them back.",
+                    "Use computer_type to enter the text instead, or ask the user to copy something else first.");
 
             RequireForeground(HwndArg(a), a, res);
 
             bool restored = false;
+            bool userChanged = false;
+            bool readObserved = false;
             try
             {
                 ClipboardSTA(delegate()
@@ -3362,6 +3437,8 @@ namespace Axon
                     if (text.Length == 0) Clipboard.Clear();
                     else Clipboard.SetText(text);
                 });
+                uint mine = Native.GetClipboardSequenceNumber();
+
                 bool held = Exclusive(a) && Native.BeginExclusive();
                 try
                 {
@@ -3371,23 +3448,43 @@ namespace Axon
                     Native.KeyTap(VkOf("v"));
                     System.Threading.Thread.Sleep(8);
                     Native.KeyUp(VkOf("ctrl"));
-                    // Give the target a moment to read the clipboard before the
-                    // finally below changes it out from under it - restoring too
-                    // early would make a slow app paste the user's old text back.
-                    System.Threading.Thread.Sleep(80);
                 }
+                // Released before the wait below, so the user's own keyboard is
+                // held for the length of one keystroke and not for however long
+                // the target app takes to react to it.
                 finally { if (held) Native.EndExclusive(); }
+
+                // Restoring before the target has read the clipboard makes it
+                // paste the user's old contents instead - a wrong-content bug that
+                // looks like a flaky paste. An app reading the clipboard holds it
+                // open for the few milliseconds it takes, which is the only
+                // observable sign the paste landed, so that is watched for: seen,
+                // restore at once; not seen, wait out the window a slow app
+                // (Electron, a remote desktop) can need. The open can fall between
+                // two polls, so a miss only costs the extra wait and is never
+                // reported as a paste that failed.
+                for (int waited = 0; waited < 400; waited += 10)
+                {
+                    if (Native.GetOpenClipboardWindow() != IntPtr.Zero)
+                    {
+                        readObserved = true;
+                        System.Threading.Thread.Sleep(20);
+                        break;
+                    }
+                    System.Threading.Thread.Sleep(10);
+                }
+
+                // Someone wrote to the clipboard while we were pasting - the user
+                // copying something of their own. Putting the old contents back
+                // over their new copy would be exactly the damage this operation
+                // exists to prevent, so it stands down.
+                userChanged = Native.GetClipboardSequenceNumber() != mine;
             }
             finally
             {
                 try
                 {
-                    ClipboardSTA(delegate()
-                    {
-                        if (hadText) Clipboard.SetText(saved);
-                        else Clipboard.Clear();
-                    });
-                    restored = true;
+                    if (!userChanged) { RestoreClipboard(saved, kept); restored = true; }
                 }
                 // Best-effort: the paste itself already happened by the time this
                 // runs, so a restore failure is reported in the result, not
@@ -3397,6 +3494,9 @@ namespace Axon
 
             res["pasted"] = text.Length;
             res["clipboard_restored"] = restored;
+            if (lost > 0) res["clipboard_formats_lost"] = lost;
+            if (userChanged) res["clipboard_changed_by_user"] = true;
+            if (readObserved) res["paste_read"] = true;
             return res;
         }
 

@@ -262,28 +262,39 @@ function truncationNote(snap) {
 // an error. That silence is the worst property a tree-driven design has, so it
 // is named here instead of being handed back as an empty listing.
 //
-// "Nothing usable" is decided with describable(), the same rule buildRows uses
-// to drop a row, because the question this answers is about what the reader
-// ends up seeing, not how many nodes the walk happened to return. A window
-// with forty unnamed wrapper panes and one canvas is exactly as blind as a
-// window with one node, and both are missed by a count.
+// The one thing this must never do is cry blind at a window that simply has
+// little UI: a user sent after --force-renderer-accessibility because their
+// three-button dialog reported four nodes is chasing a problem that is not
+// there, and would rightly stop believing the note. So no branch below fires
+// on a node count or on one missing role: each one first requires that nothing
+// in the part of the tree it is judging survives describable(), the same rule
+// buildRows uses to drop a row - the question is what the reader ended up
+// seeing, not how many nodes the walk returned. And every cause that has its
+// own explanation elsewhere (a cut-short walk, a window cloaked on another
+// virtual desktop) is handed straight back to that explanation.
 //
-// The causes are told apart by what did come back:
-//   - a Chromium/Electron window with no Document node at all: the renderer
-//     never turned its accessibility bridge on, so only the app's own frame is
-//     here (measured elsewhere: VS Code is 1 node without
-//     --force-renderer-accessibility and 140 with it);
+// What did come back narrows the cause, and only that far:
+//   - a Chromium/Electron window with no Document node and no describable
+//     chrome either: the renderer never turned its accessibility bridge on, so
+//     only the app's own frame is here (measured elsewhere: VS Code is 1 node
+//     without --force-renderer-accessibility and 140 with it). A real browser
+//     always has a tab strip and an address bar in its frame, so this fires on
+//     Electron apps and not on a browser sitting on a blank tab;
 //   - a Chromium window that does have a Document but nothing under it: the
-//     bridge is on and the page itself paints into a canvas - Figma, Google
-//     Docs, a WebGL app - so no flag will help;
-//   - a native window whose content is an unnamed Custom, Image, Pane or Group
-//     and nothing else: canvas, WebGL, DirectX, video, a remote-desktop
-//     client. A custom control whose author never implemented accessibility
-//     looks identical from here, so the note says so rather than guessing.
+//     bridge is on and the page describes nothing. A canvas-drawn app and a
+//     page that is blank or has not finished loading look identical from here,
+//     so both are named and neither is asserted;
+//   - a native window whose content is an unnamed Custom or Image and nothing
+//     else: the shape of a canvas, WebGL, DirectX, video or remote-desktop
+//     surface. A custom control whose author never implemented accessibility
+//     looks identical, so the note says so rather than guessing. Bare Pane and
+//     Group are deliberately NOT read as drawing surfaces - they are the
+//     wrappers every window has - so they fall to the generic note, which
+//     claims no cause at all.
 // Every case ends at computer_screenshot, because a picture is the only thing
 // that helps once the tree is blind.
 const SCREENSHOT = 'computer_screenshot { hwnd } is the way to see what is actually there.';
-const SURFACE_ROLES = new Set(['Custom', 'Image', 'Pane', 'Group']);
+const SURFACE_ROLES = new Set(['Custom', 'Image']);
 
 export function blindTreeNote(snap) {
   const nodes = snap.nodes || [];
@@ -291,27 +302,43 @@ export function blindTreeNote(snap) {
   // A walk that ran out of nodes or out of time did not come back blind, it
   // came back cut short, and truncationNote already says which.
   if (snap.truncated || snap.time_budget_ms) return '';
+  // Windows serves only the frame of a window cloaked on another virtual
+  // desktop, so its tree is empty for a reason that has nothing to do with
+  // accessibility - and otherDesktopNote already says so in the head line.
+  // Adding a second, wrong diagnosis on top of the right one is the false
+  // positive this whole function has to avoid.
+  if (snap.other_desktop) return '';
+
+  // Everything below the window itself: what the reader would have got.
+  const content = nodes.filter((n) => n.depth > 0);
 
   if (snap.web) {
     // Everything outside a Document is the browser's or the app's own frame,
     // which is present whether or not the renderer is exposing the page.
     const page = splitBrowser(nodes);
     const doc = nodes.find((n) => n.role === 'Document');
-    if (!doc) {
+    // No page AND no frame either. The second half is what keeps this off a
+    // browser with its tab strip and address bar in the tree, off a Chromium
+    // menu or popup window (same window class, real items, never a Document),
+    // and off Chrome's own native windows such as its task manager - all of
+    // which have no Document and are not blind in the slightest.
+    if (!doc && !content.some(describable)) {
       return 'BLIND TREE: this is a Chromium or Electron window and no page is in its tree at all - only the application frame came back, which is what a renderer with accessibility switched off looks like, not an empty page. '
         + 'Starting the app with --force-renderer-accessibility on its command line turns the renderer bridge on (Electron apps, including VS Code-based ones, take that flag). '
         + `Until then, ${SCREENSHOT}\n\n`;
     }
     // The Document node itself only carries the URL, so it is no evidence that
-    // the page rendered; what counts is whether anything under it did.
-    if (!nodes.some((n) => page.has(n.i) && n.role !== 'Document' && describable(n))) {
-      return 'BLIND TREE: the page is in the tree but has nothing in it - the renderer bridge is on and the page still describes nothing, which is what a canvas-rendered web app (Figma, Google Docs, a WebGL or video surface) looks like. No command-line flag changes this. '
-        + `${SCREENSHOT}\n\n`;
+    // the page rendered; what counts is whether anything under it did. Scoped
+    // to the page on purpose: a browser's own frame is always describable, and
+    // judging the whole tree would mean this case could never fire in a real
+    // browser - which is exactly where a canvas app is read.
+    if (doc && !nodes.some((n) => page.has(n.i) && n.role !== 'Document' && describable(n))) {
+      return 'BLIND TREE: the page is in the tree but has nothing in it. Two causes look exactly like this and nothing here can tell them apart: a page drawn into a canvas (Figma, Google Docs, a WebGL or video surface), which no command-line flag will ever fix, or a page that is blank or has not finished rendering, which a re-read a moment later will fix. '
+        + `Re-read once; if it is still empty, ${SCREENSHOT}\n\n`;
     }
     return '';
   }
 
-  const content = nodes.filter((n) => n.depth > 0);
   if (content.some(describable)) return '';
 
   const surface = content.find((n) => SURFACE_ROLES.has(n.role));
@@ -319,8 +346,8 @@ export function blindTreeNote(snap) {
     return `BLIND TREE: [${surface.i}] ${surface.role} is all this window has, with no name, no value and nothing to act on - the shape of a canvas, WebGL, DirectX, video or remote-desktop surface that accessibility cannot describe. `
       + `A custom control whose author never implemented accessibility looks exactly the same from here, so this cannot tell the two apart. ${SCREENSHOT}\n\n`;
   }
-  return `BLIND TREE: ${content.length ? `${content.length} elements came back and not one has a name, a value or anything to act on` : 'nothing came back beneath the window itself'} - `
-    + `this window is either drawn without accessibility or still loading. ${SCREENSHOT}\n\n`;
+  return `BLIND TREE: ${content.length === 1 ? 'the one element under this window has' : content.length ? `${content.length} elements came back and not one has` : 'nothing came back beneath the window itself, so nothing has'} `
+    + `a name, a value or anything to act on - this window is either drawn without accessibility or still loading, and nothing here can say which. ${SCREENSHOT}\n\n`;
 }
 
 function otherDesktopNote(snap) {

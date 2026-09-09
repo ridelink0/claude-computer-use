@@ -436,6 +436,7 @@ computer_grant { hwnd }                      needed to act, never to read
 computer_run { hwnd, steps: [...] }           every stretch of known actions, one call
 computer_click { index: 12 }                 one action whose result you must see first
 computer_clipboard                           read it; { text } sets it
+computer_paste { text }                      ctrl+v, and your clipboard survives
 ```
 
 In a browser the snapshot is the page: its URL in the header, the tabs, and
@@ -497,8 +498,33 @@ not take pays for that four times over.
 
 `computer_clipboard` reads the clipboard text, or sets it when given `text`.
 That is how text gets out of an app that will not expose it any other way -
-select, `ctrl+c`, read - and how a long paste goes in without a thousand
-keystrokes. Codex has it; now so does this.
+select, `ctrl+c`, read. Codex has it; now so does this. It leaves what it set
+on the clipboard, so it is a way to read, not a way to paste.
+
+`computer_paste { text }` is the way to paste, and it gives your clipboard
+back. It copies out everything that was on it first - an image, a file you were
+about to drop somewhere, formatted cells, not only text - sets its own text,
+sends `ctrl+v`, and restores the lot. If it cannot copy something out it
+refuses to paste at all rather than destroy it, and if you copy something of
+your own while it is working it leaves your newer copy alone. That matters
+because this plugin's whole claim is that you can keep working while it works,
+and a tool that silently emptied your clipboard would make that a lie. Windows
+only for now: the macOS host has no paste yet, so the tool is not offered
+there.
+
+### When a window's tree is empty
+
+Accessibility is opt-in, at the application and at the OS, and switched off it
+looks exactly like an app with no UI: the window is found, the tree comes back
+with nothing in it, and nothing reports an error. A read that lands in that
+state says **BLIND TREE** and says what it can about why - an Electron or
+Chromium app whose renderer bridge is off, which
+`--force-renderer-accessibility` on its command line turns on; a page or
+surface drawn into a canvas, which no flag will fix; or, when the two causes
+are genuinely indistinguishable, that they are, rather than picking one. Every
+case ends at `computer_screenshot`. It will not cry blind at a window that
+merely has little in it: it fires only when nothing at all in the tree would
+have reached you.
 
 ### Always-allowed apps
 

@@ -21,7 +21,7 @@ ToolSearch select:computer_apps,computer_snapshot,computer_grant,computer_run,co
 A second search when a task needs them: `computer_type`, `computer_key`,
 `computer_scroll`, `computer_wait_for`, `computer_launch`. A third for
 `computer_task`, `computer_focus`, `computer_close_window`,
-`computer_clipboard`, `computer_screenshot`, `computer_recap`.
+`computer_clipboard`, `computer_paste`, `computer_screenshot`, `computer_recap`.
 
 ## The loop
 
@@ -378,8 +378,19 @@ in the same window means stop, tell the user, and agree who does what.
   here.
 - `app notes:` on a grant are that app's traps. Read them.
 - `computer_clipboard` reads the clipboard text, or sets it when given `text`.
-  That is how text leaves a canvas app (select, `ctrl+c`, read) and how a long
-  paste goes in (`set`, then `ctrl+v`) without a thousand keystrokes.
+  That is how text leaves a canvas app (select, `ctrl+c`, read). It leaves what
+  it set on the clipboard, so it is for reading, not for pasting.
+- `computer_paste { text }` is how a long paste goes in without a thousand
+  keystrokes: it saves everything on the clipboard - image, files, formatted
+  cells, not just text - sets its own, sends `ctrl+v`, and puts the original
+  back. Never `computer_clipboard` then `ctrl+v`: that throws away whatever the
+  user had copied, and they will find out at the worst moment. Windows only for
+  now; it is also a `computer_run` step (`{paste: "..."}`).
+- **BLIND TREE** at the top of a snapshot means the window's tree is empty for
+  a reason, and the note says which: an Electron app whose renderer bridge is
+  off (start it with `--force-renderer-accessibility`), a page or surface drawn
+  into a canvas, or a cause nothing can name. Do what the note says; do not
+  re-read the same window hoping for different rows.
 - Apps on the user's always-allowed list are granted on first use; the result
   says so. Everything else still needs `computer_grant`.
 - `computer_status` lists running background tasks and what this session has
