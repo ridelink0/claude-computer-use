@@ -9,6 +9,7 @@ import { createInterface } from 'node:readline';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Driver, HostError } from './driver.mjs';
 import { dataDir } from './build.mjs';
 import { Policy, classify, isConsequential, isHandOff, desktopLocked, TIER, looksLikeShellName, shellKeyReason } from './policy.mjs';
@@ -19,11 +20,16 @@ import { Tasks, validateSteps, HALT_TURN } from './tasks.mjs';
 import { Journal } from './journal.mjs';
 
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
-// Kept in step with .claude-plugin/plugin.json by hand, and by the test in
-// astra-test.mjs that reads that file - the 0.8.0 release bumped both manifests
-// and left this at 0.7.0, so the server told every client it was a version
-// behind the plugin the client had installed.
-const SERVER_INFO = { name: 'computer-use', version: '0.8.0' };
+// The version is read from .claude-plugin/plugin.json at start rather than
+// kept in step by hand: 0.8.0 shipped a server saying 0.7.0, and 0.8.1 a
+// server saying 0.8.0, because the hand that bumps the manifest is the hand
+// that forgets this line. astra-test.mjs checks the two agree.
+const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+function manifestVersion() {
+  try { return JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8')).version || '0.0.0'; }
+  catch { return '0.0.0'; }
+}
+const SERVER_INFO = { name: 'computer-use', version: manifestVersion() };
 
 // Claude Code puts a server's instructions in front of the model at the start
 // of every session, before any tool schema has been loaded. For a deferred
