@@ -312,9 +312,9 @@ namespace Axon
                 _idleTimer.Tick += delegate
                 {
                     _idleTimer.Stop();
-                    try { _ring.Leave(); } catch { }
-                    try { _banner.Leave(); } catch { }
-                    try { _cursor.Leave(); } catch { }
+                    try { _ring.Vanish(); } catch { }
+                    try { _banner.Vanish(); } catch { }
+                    try { _cursor.Vanish(); } catch { }
                 };
 
                 _ready = true;
@@ -446,8 +446,8 @@ namespace Axon
                 {
                     try
                     {
-                        _ring.Enter();
-                        _banner.Enter();
+                        _ring.Appear();
+                        _banner.Appear();
                         if (_idleTimer != null) { _idleTimer.Stop(); _idleTimer.Start(); }
                     }
                     catch { }
@@ -672,7 +672,7 @@ namespace Axon
                 }
             }
 
-            internal void Enter()
+            internal void Appear()
             {
                 if (Visible) return;
                 Bounds = SystemInformation.VirtualScreen;
@@ -683,7 +683,7 @@ namespace Axon
                 Animate(220, delegate(float t) { Alpha = t; }, null);
             }
 
-            internal void Leave()
+            internal void Vanish()
             {
                 if (!Visible) return;
                 float from = Alpha;
@@ -793,7 +793,7 @@ namespace Axon
                 _stopRect = new Rectangle(Width - PadR - w, (H - StopH) / 2, w, StopH);
             }
 
-            internal void Enter()
+            internal void Appear()
             {
                 if (Visible) return;
                 int w = MeasureWidth();
@@ -814,7 +814,7 @@ namespace Axon
                 }, null);
             }
 
-            internal void Leave()
+            internal void Vanish()
             {
                 if (!Visible) { _pulse.Stop(); return; }
                 _pulse.Stop();
@@ -859,8 +859,8 @@ namespace Axon
                 if (fire)
                 {
                     RequestStop();
-                    Leave();
-                    try { _ring.Leave(); _cursor.Leave(); } catch { }
+                    Vanish();
+                    try { _ring.Vanish(); _cursor.Vanish(); } catch { }
                 }
                 else Redraw();
                 base.OnMouseUp(e);
@@ -952,7 +952,7 @@ namespace Axon
                 }, null);
             }
 
-            internal void Leave()
+            internal void Vanish()
             {
                 _hover.Stop();
                 _showLabel = false;
