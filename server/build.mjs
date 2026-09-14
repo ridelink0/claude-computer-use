@@ -176,6 +176,31 @@ export function ensureHost({ force = false, log = () => {} } = {}) {
     const out = ((res.stdout || '') + (res.stderr || '')).trim();
     throw new BuildError('Compiling the Computer Use host failed.', out.slice(0, 2000));
   }
+  // The compiler has been linting this code on every build and the result was
+  // going straight to the floor: stdout is read ONLY when status is non-zero,
+  // so every warning on a SUCCESSFUL build was discarded unread. On
+  // interop-heavy code that is the cheapest static analysis available - CS0618
+  // obsolete APIs, unreachable code, unused locals in P/Invoke paths - and
+  // surfacing it costs nothing, because csc has already done the work.
+  //
+  // Printed rather than thrown: a warning is not a reason to fail a build that
+  // produced a working executable, and making it one would mean the host could
+  // not be rebuilt until every warning was cleared.
+  const warnings = ((res.stdout || '') + (res.stderr || ''))
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.includes('warning CS'));
+  if (warnings.length) {
+    const shown = warnings.slice(0, 20);
+    process.stdout.write(
+      warnings.length + ' C# compiler warning' + (warnings.length === 1 ? '' : 's') + ':\n'
+    );
+    for (const line of shown) process.stdout.write('  ' + line + '\n');
+    if (warnings.length > shown.length) {
+      process.stdout.write('  ... and ' + (warnings.length - shown.length) + ' more\n');
+    }
+  }
+
   if (!fs.existsSync(temp)) {
     throw new BuildError('The compiler reported success but produced no executable.', null);
   }
