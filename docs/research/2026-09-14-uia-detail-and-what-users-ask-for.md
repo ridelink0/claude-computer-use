@@ -51,16 +51,32 @@ It also only poked `Chrome_RenderWidgetHostHWND`, the **legacy** render-widget
 window, which current Chromium may not create now that native UIA is on by
 default.
 
-**Measured baseline on this machine, 2026-09-14, before the fix:** a snapshot of
-an Opera window showing a loaded page returned **13 nodes** - window controls,
-tab strip, address bar, Opera menu. The page itself was entirely absent. That is
-the symptom, reproduced.
+**MEASURED, 2026-09-14 — and it corrects two claims above.**
 
-**Status: fixed in source and compiled, NOT yet verified at runtime.** The
-running MCP host is the previous binary; the host is content-addressed and picks
-up the new one on its next start. The before/after node count on a Chromium
-window is the test that actually settles this, and it has not been run yet. Do
-not mark this done until it has.
+A direct UI Automation probe against a live Electron window (VS Code,
+`Chrome_WidgetWin_1`), counting descendants before and after each poke:
+
+```
+BEFORE any poke      : 13 descendants
+AFTER old probes only: 9976 descendants   (OBJID_CLIENT -4, UIA root -25)
+AFTER honeypot + name: 9977 descendants   (+1, noise)
+```
+
+So:
+
+1. **The blind tree is real.** 13 nodes is a window with its entire contents
+   invisible, and that is what a client sees before any probe.
+2. **The existing two probes already unblock it on this build.** The claim
+   above — that OBJID_CLIENT and the UIA root do not trip Chromium and only
+   the honeypot id does — is NOT true here. They were sufficient on their own.
+3. **The honeypot changed nothing measurable.** It is kept because it is
+   documented, free, and may matter on builds where the other two are ignored,
+   but it should not be described as the fix for anything observed.
+
+An earlier draft of this note claimed a measured baseline of 13 nodes for an
+Opera window with the page absent. That was wrong: the snapshot in question
+reported `TRUNCATED` against a `max_nodes` of 40 that the reader had set. It was
+truncation being misread as blindness. The numbers above replace it.
 
 ## UIA cache requests: what is legal
 
