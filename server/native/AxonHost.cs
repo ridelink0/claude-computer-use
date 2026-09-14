@@ -1105,6 +1105,26 @@ namespace Axon
         static readonly IntPtr OBJID_CLIENT = new IntPtr(unchecked((int)0xFFFFFFFC));
         const int UiaRootObjectId = -25;
         const uint SMTO_ABORTIFHUNG = 0x0002;
+        // The screen-reader honeypot, and the half of the handshake this was
+        // missing. Chromium's own design note is explicit: "Chrome calls
+        // NotifyWinEvent with EVENT_SYSTEM_ALERT and the custom object id of 1.
+        // If it subsequently receives a WM_GETOBJECT call for that custom object
+        // id, it assumes that assistive technology is running."
+        //
+        // Asking for OBJID_CLIENT or the UIA root alone does NOT trip it. Worse,
+        // current Chromium no longer trusts the honeypot on its own either -
+        // ax_platform.cc says outright that it "has been abused", and now waits
+        // for a NAME property to be read as well before it will build the web
+        // tree. Both halves are needed, in either order:
+        //
+        //   OnScreenReaderHoneyPotQueried()  <- this message
+        //   OnMinimalPropertiesUsed(name)    <- the snapshot walk, which reads Name
+        //
+        // So this poke is what makes the walk that follows count for something.
+        // Reading BoundingRectangle, IsEnabled, RuntimeId or ProcessId never
+        // will: they are on Chromium's explicit no-escalation list, because
+        // ordinary non-screen-reader UIA clients touch them constantly.
+        static readonly IntPtr ScreenReaderHoneyPotId = new IntPtr(1);
 
         static bool IsChromiumWindow(AutomationElement win)
         {
@@ -1134,7 +1154,13 @@ namespace Axon
                     Native.GetClassName(h, sb, sb.Capacity);
                     string c = sb.ToString();
                     // The window that hosts the page's accessibility tree.
-                    if (c == "Chrome_RenderWidgetHostHWND") widgets.Add(h);
+                    //
+                    // Chrome_RenderWidgetHostHWND is the LEGACY render-widget
+                    // window, and modern Chromium may not create it at all now
+                    // that native UIA is on by default - which would leave this
+                    // walk with nothing to poke. So any Chrome_* child counts,
+                    // and the top window is added below as a further fallback.
+                    if (c.StartsWith("Chrome_")) widgets.Add(h);
                     return true;
                 }, IntPtr.Zero);
             }
@@ -1147,6 +1173,9 @@ namespace Axon
                 try
                 {
                     IntPtr res;
+                    // Honeypot first: it is the one Chromium actually watches
+                    // for, and the other two do not substitute for it.
+                    Native.SendMessageTimeout(w, WM_GETOBJECT, IntPtr.Zero, ScreenReaderHoneyPotId, SMTO_ABORTIFHUNG, 300, out res);
                     Native.SendMessageTimeout(w, WM_GETOBJECT, IntPtr.Zero, OBJID_CLIENT, SMTO_ABORTIFHUNG, 300, out res);
                     Native.SendMessageTimeout(w, WM_GETOBJECT, IntPtr.Zero, new IntPtr(UiaRootObjectId), SMTO_ABORTIFHUNG, 300, out res);
                 }

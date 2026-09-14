@@ -69,7 +69,7 @@ reports an error.
   node without the flag and 140 with it**. On Windows 1903+ the OS converts
   Chromium's IAccessible2 data into UIA, which is why this bites less here
   than on macOS and Linux - but it still bites.
-  *Detection that works*: `ToolkitName == "Chromium"` plus a frame with zero
+  *Detection that works*: **CORRECTED 2026-09-14 - there is no UIA ToolkitName property; that was wrong. Use ClassName (Chrome_WidgetWin_*) or ProviderDescription.** Originally written as `ToolkitName == "Chromium"` plus a frame with zero
   filtered children means "the renderer bridge is off", not "no UI". We should
   say that in the result instead of returning an empty snapshot.
 - **Canvas, WebGL, DirectX, video and remote-desktop surfaces have no tree at
