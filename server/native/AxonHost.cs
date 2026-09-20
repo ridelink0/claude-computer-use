@@ -552,6 +552,9 @@ namespace Axon
                 case "screenshot": return OpScreenshot(a);
                 case "clipboard": return OpClipboard(a);
                 case "paste": return OpPaste(a);
+                case "paste_files": return OpPasteFiles(a);
+                case "open": return OpOpen(a);
+                case "file_dialog": return OpFileDialog(a);
                 case "describe": return OpDescribe(a);
                 case "busy": return OpBusy(a);
                 case "banner": return OpBanner(a);
@@ -3426,6 +3429,199 @@ namespace Axon
             });
         }
 
+
+        // Files on the clipboard, then Ctrl+V - what a person does to attach a
+        // document to a mail, a chat, a Word page or a Chrome upload box, and the
+        // paste a text clipboard cannot do. CF_HDROP is what Explorer's own Ctrl+C
+        // puts there, so any app that accepts a file pasted from Explorer accepts
+        // this. Same save-and-restore as the text paste.
+        static object OpPasteFiles(Dictionary<string, object> a)
+        {
+            List<string> files = new List<string>();
+            object raw = Get(a, "files");
+            System.Collections.IList list = raw as System.Collections.IList;
+            if (list != null) { foreach (object o in list) { string s = Str(o); if (!string.IsNullOrEmpty(s)) files.Add(s); } }
+            else { string one = Str(raw); if (!string.IsNullOrEmpty(one)) files.Add(one); }
+            if (files.Count == 0) throw new AxonError("bad_files", "paste_files needs files: one path or a list.", null);
+            System.Collections.Specialized.StringCollection drop = new System.Collections.Specialized.StringCollection();
+            List<string> full = new List<string>();
+            foreach (string f in files)
+            {
+                string p = Path.GetFullPath(f);
+                if (!File.Exists(p) && !Directory.Exists(p))
+                    throw new AxonError("not_found", "No file or folder at " + p + ".", "Check the path; this pastes real files only.");
+                drop.Add(p);
+                full.Add(p);
+            }
+            Dictionary<string, object> res = new Dictionary<string, object>();
+            PasteCore(a, res, delegate() { Clipboard.SetFileDropList(drop); });
+            res["pasted_files"] = full.ToArray();
+            return res;
+        }
+
+        // Extensions the shell would execute rather than open in a viewer. open
+        // is for documents and folders; an application goes through launch, which
+        // has its own checks.
+        static readonly HashSet<string> BlockedOpenExt = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+            ".exe", ".com", ".bat", ".cmd", ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh",
+            ".msi", ".msp", ".scr", ".pif", ".lnk", ".url", ".reg", ".hta", ".cpl", ".jar", ".appx", ".msix", ".inf", ".scf" };
+
+        // A document or folder in whatever the user's machine opens it with:
+        // ShellExecute "open", the same thing a double-click in Explorer does.
+        static object OpOpen(Dictionary<string, object> a)
+        {
+            string path = Str(Get(a, "path"));
+            if (string.IsNullOrEmpty(path)) throw new AxonError("bad_path", "open needs path.", null);
+            string full = Path.GetFullPath(path);
+            bool folder = Directory.Exists(full);
+            if (!folder && !File.Exists(full))
+                throw new AxonError("not_found", "No file or folder at " + full + ".", "Check the path.");
+            string ext = folder ? "" : Path.GetExtension(full);
+            if (!folder && BlockedOpenExt.Contains(ext))
+                throw new AxonError("open_blocked", "'" + ext + "' files run code; open is for documents and folders.",
+                    "Use computer_launch for an application.");
+            Dictionary<string, object> res = new Dictionary<string, object>();
+            int pid = 0;
+            try
+            {
+                System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo(full);
+                psi.UseShellExecute = true;
+                psi.Verb = "open";
+                using (System.Diagnostics.Process p = System.Diagnostics.Process.Start(psi))
+                {
+                    if (p != null) { try { pid = p.Id; } catch { } }
+                }
+            }
+            catch (System.ComponentModel.Win32Exception ex)
+            {
+                if (ex.NativeErrorCode == 1155 /* ERROR_NO_ASSOCIATION */)
+                    throw new AxonError("no_association", "Nothing on this machine is set to open '" + ext + "' files.",
+                        "Open it from inside an application instead: computer_launch the app, File > Open, then computer_file_dialog with the path.");
+                throw new AxonError("open_failed", ex.Message, null);
+            }
+            res["path"] = full;
+            res["kind"] = folder ? "folder" : "file";
+            res["pid"] = pid;
+            return res;
+        }
+
+        // The Windows common Open/Save dialog, driven by its own automation ids:
+        // 1148 is the "File name:" box and 1 is the Open/Save button, in every app
+        // that uses the shell dialog (Notepad, Chrome, Edge, Outlook, VS Code's
+        // native picker, Paint, Explorer). Typing a full path there and confirming
+        // is what a person does when the folder tree is too slow to click through.
+        // The Office and Adobe custom dialogs are not this dialog; they are driven
+        // like any other window, by snapshot.
+        static object OpFileDialog(Dictionary<string, object> a)
+        {
+            string path = Str(Get(a, "path"));
+            if (string.IsNullOrEmpty(path)) throw new AxonError("bad_path", "file_dialog needs path.", null);
+            string full = Path.GetFullPath(path);
+            bool save = string.Equals(Str(Get(a, "action")), "save", StringComparison.OrdinalIgnoreCase);
+            if (!save && !File.Exists(full) && !Directory.Exists(full))
+                throw new AxonError("not_found", "No file or folder at " + full + ".",
+                    "Check the path, or pass action: \"save\" to name a file that does not exist yet.");
+            IntPtr owner = HwndArg(a);
+            AutomationElement dlg = FindFileDialog(owner);
+            if (dlg == null)
+                throw new AxonError("no_file_dialog", "No Open or Save dialog is showing" + (owner != IntPtr.Zero ? " for that window" : "") + ".",
+                    "Open one first (Ctrl+O, Ctrl+S, an Upload or Browse button), then call again. If the app uses its own picker, snapshot it and drive it with click and type.");
+            Dictionary<string, object> res = new Dictionary<string, object>();
+            string title = null;
+            try { title = dlg.Current.Name; } catch { }
+            IntPtr dlgHwnd = IntPtr.Zero;
+            try { dlgHwnd = new IntPtr(dlg.Current.NativeWindowHandle); } catch { }
+            GuardSameWindow(a, dlgHwnd);
+            RequireForeground(dlgHwnd, a, res);
+
+            AutomationElement box = dlg.FindFirst(TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.AutomationIdProperty, "1148"));
+            if (box == null)
+                throw new AxonError("no_filename_box", "The dialog has no File name box (automation id 1148), so it is not the Windows common dialog.",
+                    "Snapshot it and drive it with click and type.");
+            bool set = false;
+            object vp;
+            if (box.TryGetCurrentPattern(ValuePattern.Pattern, out vp))
+            {
+                try { ((ValuePattern)vp).SetValue(full); set = true; } catch { }
+            }
+            if (!set)
+            {
+                AutomationElement edit = box.FindFirst(TreeScope.Descendants,
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit));
+                if (edit != null && edit.TryGetCurrentPattern(ValuePattern.Pattern, out vp))
+                {
+                    try { ((ValuePattern)vp).SetValue(full); set = true; } catch { }
+                }
+            }
+            if (!set)
+            {
+                // Neither control took a value write: focus the box, select what
+                // is there and type the path the way a person would.
+                try { box.SetFocus(); } catch { }
+                System.Threading.Thread.Sleep(30);
+                Native.KeyDown(VkOf("ctrl"));
+                Native.KeyTap(VkOf("a"));
+                Native.KeyUp(VkOf("ctrl"));
+                Native.TypeUnicode(full);
+                set = true;
+            }
+            System.Threading.Thread.Sleep(60);
+            // Confirm with the dialog's own button so a relabelled "Upload" or
+            // "Select Folder" is still the right one; Enter in the box is the fallback.
+            AutomationElement ok = dlg.FindFirst(TreeScope.Children,
+                new AndCondition(new PropertyCondition(AutomationElement.AutomationIdProperty, "1"),
+                                 new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button)));
+            bool invoked = false;
+            object ip;
+            if (ok != null && ok.TryGetCurrentPattern(InvokePattern.Pattern, out ip))
+            {
+                try { ((InvokePattern)ip).Invoke(); invoked = true; } catch { }
+            }
+            if (!invoked)
+            {
+                try { box.SetFocus(); } catch { }
+                System.Threading.Thread.Sleep(20);
+                Native.KeyTap(VkOf("enter"));
+            }
+            bool closed = false;
+            for (int waited = 0; waited < 3000; waited += 50)
+            {
+                System.Threading.Thread.Sleep(50);
+                if (dlgHwnd == IntPtr.Zero || !Native.IsWindow(dlgHwnd) || !Native.IsWindowVisible(dlgHwnd)) { closed = true; break; }
+            }
+            res["dialog"] = title;
+            res["path"] = full;
+            res["closed"] = closed;
+            res["method"] = invoked ? "button" : "enter";
+            return res;
+        }
+
+        // The visible common file dialog (window class #32770 with a File name box)
+        // owned by the given window - directly, or through the hidden owner some
+        // apps park between themselves and their dialogs - or any one when no
+        // owner is given.
+        static AutomationElement FindFileDialog(IntPtr owner)
+        {
+            AutomationElementCollection dialogs = AutomationElement.RootElement.FindAll(TreeScope.Children,
+                new PropertyCondition(AutomationElement.ClassNameProperty, "#32770"));
+            foreach (AutomationElement d in dialogs)
+            {
+                IntPtr h = IntPtr.Zero;
+                try { h = new IntPtr(d.Current.NativeWindowHandle); } catch { continue; }
+                if (h == IntPtr.Zero || !Native.IsWindowVisible(h)) continue;
+                if (owner != IntPtr.Zero)
+                {
+                    IntPtr o = Native.GetWindowRel(h, 4 /* GW_OWNER */);
+                    bool mine = o == owner || (o != IntPtr.Zero && Native.GetWindowRel(o, 4) == owner);
+                    if (!mine) continue;
+                }
+                if (d.FindFirst(TreeScope.Descendants, new PropertyCondition(AutomationElement.AutomationIdProperty, "1148")) == null) continue;
+                return d;
+            }
+            return null;
+        }
+
         // A paste that gives the clipboard back afterwards. computer_clipboard
         // sets the clipboard and leaves it set - fine for reading a value out of
         // an app, but every paste built on it would quietly destroy whatever the
@@ -3438,6 +3634,19 @@ namespace Axon
             string text = Str(Get(a, "text"));
             if (text == null) throw new AxonError("bad_text", "paste needs text.", null);
             Dictionary<string, object> res = new Dictionary<string, object>();
+            PasteCore(a, res, delegate()
+            {
+                if (text.Length == 0) Clipboard.Clear();
+                else Clipboard.SetText(text);
+            });
+            res["pasted"] = text.Length;
+            return res;
+        }
+
+        // The paste itself, shared by the text and the file paste: save the
+        // clipboard, put ours on it, Ctrl+V, watch for the read, put theirs back.
+        static void PasteCore(Dictionary<string, object> a, Dictionary<string, object> res, System.Threading.ThreadStart setClipboard)
+        {
             // Same gates as key/type with no element named: this types into
             // whatever holds focus, so it goes through the same "is the user
             // already in this window" and "bring it to the foreground" checks.
@@ -3461,11 +3670,7 @@ namespace Axon
             bool readObserved = false;
             try
             {
-                ClipboardSTA(delegate()
-                {
-                    if (text.Length == 0) Clipboard.Clear();
-                    else Clipboard.SetText(text);
-                });
+                ClipboardSTA(setClipboard);
                 uint mine = Native.GetClipboardSequenceNumber();
 
                 bool held = Exclusive(a) && Native.BeginExclusive();
@@ -3521,12 +3726,10 @@ namespace Axon
                 catch { }
             }
 
-            res["pasted"] = text.Length;
             res["clipboard_restored"] = restored;
             if (lost > 0) res["clipboard_formats_lost"] = lost;
             if (userChanged) res["clipboard_changed_by_user"] = true;
             if (readObserved) res["paste_read"] = true;
-            return res;
         }
 
         // What a target is called, before acting on it - so a click by

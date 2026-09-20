@@ -372,8 +372,18 @@ const TOOLS = [
   },
   {
     name: 'computer_paste',
-    description: 'Ctrl+V text into whatever holds the keyboard focus without touching the user\'s clipboard: it is saved before the paste and restored after.',
-    inputSchema: { type: 'object', required: ['text'], properties: { text: str, hwnd: int, title: str } },
+    description: 'Ctrl+V into whatever holds the keyboard focus without touching the user\'s clipboard: it is saved before the paste and restored after. text pastes text. files pastes real files as a file drop (what Explorer\'s Ctrl+C puts on the clipboard), which attaches a document to a mail, a chat, a Word page or a browser upload box. file with as_text pastes that file\'s text contents instead.',
+    inputSchema: { type: 'object', properties: { text: str, file: str, files: { type: 'array', items: str }, as_text: { type: 'boolean' }, hwnd: int, title: str } },
+  },
+  {
+    name: 'computer_open',
+    description: 'Open a document or folder in whatever this machine opens it with (a double-click in Explorer), then wait for its window. Documents and folders only; an application goes through computer_launch.',
+    inputSchema: { type: 'object', required: ['path'], properties: { path: str, timeout_ms: int } },
+  },
+  {
+    name: 'computer_file_dialog',
+    description: 'Drive the Windows Open/Save dialog an app has just shown: put a full path in its File name box and confirm. This is how a file is fetched from Explorer for an app, or attached to a page after its Upload button opened the picker. action: "save" allows a path that does not exist yet.',
+    inputSchema: { type: 'object', required: ['path'], properties: { path: str, action: { type: 'string', enum: ['open', 'save'] }, hwnd: int, title: str } },
   },
   {
     name: 'computer_status',
@@ -1103,9 +1113,54 @@ const handlers = {
     return act('type', args, (r) => `typed ${r.typed} characters${r.background ? ` via ${r.method} (window left where it was)` : ''}.`);
   },
 
+  async computer_open(args) {
+    const target = String(args.path || '').trim();
+    if (!target) return fail('bad_path', 'Pass path: a document or folder to open in its default app.', null);
+    const before = await windowSet();
+    let r;
+    try { ({ result: r } = await driver.call('open', { path: target })); }
+    catch (err) { return fail(err.code || 'open_failed', err.message, err.hint || null); }
+    const timeout = Math.max(1000, Math.min(Number(args.timeout_ms) || 8000, 60000));
+    const started = Date.now();
+    while (Date.now() - started < timeout) {
+      await sleep(250);
+      const appeared = (await newWindowsSince(before)).filter((w) => !w.minimized && !w.popup);
+      if (appeared.length) {
+        return text(`opened ${r.path} (${r.kind}) after ${Date.now() - started}ms: ${appeared.map(describeWindow).join('; ')}. ` +
+          'Read it with computer_snapshot; computer_grant before acting.');
+      }
+    }
+    return text(`opened ${r.path} (${r.kind}); no new window appeared within ${timeout}ms. A single-instance app (Word, Acrobat, a browser) ` +
+      'opens documents in the window it already has - call computer_apps and snapshot that window.');
+  },
+
+  async computer_file_dialog(args) {
+    if (!args.path) return fail('bad_path', 'Pass path: the full path to open, or the path to save as with action: "save".', null);
+    return act('file_dialog', args, (r) => (r.closed ? `dialog accepted ${JSON.stringify(r.path)} via ${r.method}` : `dialog still open after ${JSON.stringify(r.path)} via ${r.method}`)
+      + (r.dialog ? ` ("${r.dialog}")` : '') + '.'
+      + (r.closed ? '' : ' It may be asking something (overwrite? not found?) - snapshot it.'));
+  },
+
   async computer_paste(args) {
-    return act('paste', args, (r) => {
-      let out = `pasted ${r.pasted} characters via Ctrl+V.`;
+    const files = args.files != null ? (Array.isArray(args.files) ? args.files : [args.files]) : (args.file ? [args.file] : []);
+    if (files.length && args.as_text) {
+      if (files.length > 1) return fail('bad_files', 'as_text pastes one file\'s contents; pass a single file.', null);
+      let body;
+      try {
+        const st = fsx.statSync(String(files[0]));
+        if (st.size > 1000000) return fail('file_too_large', `${files[0]} is ${st.size} bytes; as_text pastes up to 1 MB of text.`, 'Paste it as a file instead: drop as_text.');
+        body = fsx.readFileSync(String(files[0]), 'utf8');
+      } catch (err) { return fail('not_found', `Could not read ${files[0]}: ${err.message}`, null); }
+      return act('paste', { ...args, text: body, file: undefined, files: undefined, as_text: undefined }, describePaste);
+    }
+    if (files.length) {
+      return act('paste_files', { ...args, files: files.map((f) => String(f)), text: undefined, file: undefined }, (r) =>
+        describePaste(r, `pasted ${r.pasted_files.length} file(s) as a file drop via Ctrl+V: ${r.pasted_files.join(', ')}.`));
+    }
+    if (typeof args.text !== 'string') return fail('bad_text', 'Pass text to paste, or file / files to paste a document.', null);
+    return act('paste', args, describePaste);
+    function describePaste(r, head) {
+      let out = head || `pasted ${r.pasted} characters via Ctrl+V.`;
       // Whether the target actually took the keystroke is not knowable from
       // here, so this reports what was observed and never more: seeing the
       // target open the clipboard proves it read our text; not seeing it
@@ -1120,7 +1175,7 @@ const handlers = {
         out += ' WARNING: could not restore the user\'s previous clipboard contents - tell them, they may need to copy it again.';
       }
       return out;
-    });
+    }
   },
 
   async computer_wait_for(args) {
@@ -1474,6 +1529,8 @@ const STEP_HANDLERS = {
   snapshot: (a) => handlers.computer_snapshot(a),
   focus: (a) => handlers.computer_focus(a),
   paste: (a) => handlers.computer_paste(a),
+  open: (a) => handlers.computer_open(a),
+  file_dialog: (a) => handlers.computer_file_dialog(a),
 };
 
 // Every input-sending tool funnels through one gate, so there is exactly one
@@ -1481,7 +1538,7 @@ const STEP_HANDLERS = {
 // Ops that act on a specific control rather than on whatever has focus.
 const NEEDS_ELEMENT = new Set(['click', 'set_value']);
 // Ops after which a window may have appeared - a dialog, a prompt, a picker.
-const OPENS_WINDOWS = new Set(['click', 'key', 'type', 'set_value', 'paste']);
+const OPENS_WINDOWS = new Set(['click', 'key', 'type', 'set_value', 'paste', 'paste_files', 'file_dialog']);
 
 async function act(op, args, describe) {
   // Validate the target before resolving a window, so a call with no target at
