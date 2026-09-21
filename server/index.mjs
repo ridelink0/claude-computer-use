@@ -1180,6 +1180,11 @@ const handlers = {
         if (st.size > 1000000) return fail('file_too_large', `${files[0]} is ${st.size} bytes; as_text pastes up to 1 MB of text.`, 'Paste it as a file instead: drop as_text.');
         body = decodeText(fsx.readFileSync(String(files[0])));
         if (body === null) return fail('not_text', `${files[0]} is not a text file (it holds NUL bytes past any byte-order mark).`, 'Drop as_text to paste it as a file.');
+        // computer_type drops every CR and taps Enter for each LF (TypeUnicode
+        // in the host), so a pasted file gets the same line ends: CRLF becomes
+        // LF and a lone CR vanishes. The byte-order mark is already gone -
+        // decodeText strips it as it picks the encoding.
+        body = body.replace(/\r/g, '');
       } catch (err) { return fail('not_found', `Could not read ${files[0]}: ${err.message}`, null); }
       return act('paste', { ...args, text: body, file: undefined, files: undefined, as_text: undefined }, describePaste);
     }
