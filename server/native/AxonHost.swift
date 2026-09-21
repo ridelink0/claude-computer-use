@@ -1234,6 +1234,13 @@ func dispatchOp(_ op: String, _ a: [String: Any]) throws -> [String: Any] {
     case "describe": return try opDescribe(a)
     case "busy": return try opBusy(a)
     case "banner": return try opBanner(a)
+    // The three document tools are Windows only and are not offered in the
+    // tool list on macOS, but a run step can still name one; that gets a
+    // plain answer here rather than "unknown operation".
+    case "open", "file_dialog", "paste", "paste_files":
+        throw AxonError("unsupported_on_macos",
+            "'\(op)' is a Windows-only operation; the macOS host has no \(op).",
+            "computer_paste, computer_open and computer_file_dialog are not available on macOS. Use computer_launch and the app's own Open dialog by snapshot, and computer_type for text.")
     default: throw AxonError("unknown_op", "Unknown operation '\(op)'.", nil)
     }
 }

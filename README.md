@@ -513,7 +513,10 @@ your own while it is working it leaves your newer copy alone. That matters
 because this plugin's whole claim is that you can keep working while it works,
 and a tool that silently emptied your clipboard would make that a lie. Windows
 only for now: the macOS host has no paste yet, so the tool is not offered
-there.
+there. The same goes for `computer_open` and `computer_file_dialog`: on macOS
+none of the three is in the tool list, and a `computer_run` step that names
+one (`paste`, `open`, `file_dialog`) gets `unsupported_on_macos` from the
+host, which says what to do instead.
 
 ### When a window's tree is empty
 

@@ -412,7 +412,10 @@ in the same window means stop, tell the user, and agree who does what.
   .bat, .ps1, .lnk and the rest) are refused: an application goes through
   `computer_launch`. A single-instance app (Word, Acrobat, a browser) opens
   the document in the window it already has; the reply says so, so snapshot
-  that window rather than waiting for a new one.
+  that window rather than waiting for a new one. The file type's handler is
+  judged like a launch: a type that opens in an editor, an interpreter or a
+  blocked app is refused (`open_blocked`), and the reply names the handler.
+  Windows only.
 - `computer_file_dialog { hwnd, path }` drives the Windows Open/Save dialog an
   app has just shown - after Ctrl+O, Ctrl+S, an Upload or a Browse button -
   by its own ids: the path goes into the File name box and the dialog's own
