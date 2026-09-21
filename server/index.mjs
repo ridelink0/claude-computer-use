@@ -941,11 +941,19 @@ const handlers = {
     // once; repeating them on every read cost more than the read.
     // ...and the safety monitor: rows that read like instructions to an agent
     // are named once, in front, as the page data they are.
-    body = presenceNote(await presence()) + injectionBanner(win) + blindTreeNote(result) + probeWarning(shownRows) + body;
+    const blind = blindTreeNote(result);
+    body = presenceNote(await presence()) + injectionBanner(win) + blind + probeWarning(shownRows) + body;
     bannerStatus('reading ' + appWord(win));
 
     const content = [{ type: 'text', text: body }];
-    if (args.with_image) {
+    // A blind tree is not a dead end. Astra's one read always carries a
+    // screenshot beside a tree that may be null, so the model is never left
+    // holding nothing; here the model had to notice the BLIND TREE line and
+    // ask again with with_image, and in a field test a browser task never got
+    // that far. When the tree comes back blind the picture is taken in the
+    // same read, unless the caller said with_image: false.
+    const autoImage = Boolean(blind) && args.with_image !== false && !args.with_image;
+    if (args.with_image || autoImage) {
       // The hybrid read, which is how Codex actually sees a window: the semantic
       // tree AND a picture of the same window, together. The tree is exact and
       // carries text scrolled out of view; the image shows canvas-drawn and
@@ -958,9 +966,11 @@ const handlers = {
         const shot = await driver.call('screenshot', { hwnd, max_width: 1100, quality: 60 });
         budget.shots++;
         budget.shotBytes += shot.result.bytes;
-        content[0].text +=
-          `\n\n[image of this same window attached below (${shot.result.width}x${shot.result.height}). ` +
-          `The tree above is exact and includes text scrolled out of view; the image shows visual detail the tree cannot.]`;
+        content[0].text += autoImage
+          ? `\n\n[the tree is blind, so a picture of the window is attached below (${shot.result.width}x${shot.result.height}) in the same read. ` +
+            `Read from the picture; with_image: false on the next call skips it.]`
+          : `\n\n[image of this same window attached below (${shot.result.width}x${shot.result.height}). ` +
+            `The tree above is exact and includes text scrolled out of view; the image shows visual detail the tree cannot.]`;
         content.push({ type: 'image', data: shot.result.data, mimeType: shot.result.mime });
       } catch (err) {
         content[0].text += `\n\n(no image: ${err.code || 'error'} - ${err.message})`;

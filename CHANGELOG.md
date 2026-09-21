@@ -4,6 +4,18 @@ Every released version, newest first, on the tag of the same name. Dates are the
 release commit's own. Anything marked UNVERIFIED was not exercised on real
 hardware at the time it shipped.
 
+## 0.9.4 - 2026-09-21
+
+- A blind tree is not a dead end: when a snapshot comes back blind and the
+  caller did not say with_image: false, the picture of the window is attached
+  in the same read, the way Astra one read always carries a screenshot beside
+  a tree that may be null. A browser task in a field test had stalled exactly
+  there.
+- docs/TODO-astra.md: what the Astra comparison settled (keep the overlay,
+  banner, coexistence, appshot, journal and recap; none has an Astra
+  equivalent and all are settings) and the six open items, ranked. The full
+  research is in docs/research.
+
 ## 0.9.3 - 2026-09-21
 
 From a live field test by another session on this machine, with the verbatim
