@@ -377,7 +377,7 @@ const TOOLS = [
   },
   {
     name: 'computer_open',
-    description: 'Open a document or folder in whatever this machine opens it with (a double-click in Explorer), then wait for its window. Documents and folders only; an application goes through computer_launch.',
+    description: 'Open a document or folder in whatever this machine opens it with (a double-click in Explorer), then wait for its window. Documents and folders only; an application goes through computer_launch, and a file whose handler is a blocked or shell-tier app (an editor, an interpreter) is refused.',
     inputSchema: { type: 'object', required: ['path'], properties: { path: str, timeout_ms: int } },
   },
   {
@@ -1119,6 +1119,29 @@ const handlers = {
     if (/[\u0000-\u001f]/.test(target)) return fail('bad_path', 'The path contains control characters.', null);
     const locked = await lockedCheck();
     if (locked) return locked;
+    // The extension deny-list in the host is the first gate. The second is the
+    // one computer_launch applies to an app name: the executable the shell
+    // would run for this file type is looked up without running it, and a
+    // handler in the blocked or shell tier is refused - a .md that opens in
+    // VS Code, a .kdbx that opens in KeePass, a type handed to an interpreter.
+    let probe;
+    try { ({ result: probe } = await driver.call('open', { path: target, probe: true })); }
+    catch (err) { return fail(err.code || 'open_failed', err.message, err.hint || null); }
+    let via = '';
+    if (probe.app) {
+      const base = path.basename(probe.app).replace(/\.exe$/i, '');
+      const { tier, reason } = classify({ process: base, path: probe.app, title: '' });
+      if (tier === TIER.BLOCKED) {
+        return fail('open_blocked', `${path.basename(probe.path)} would open in "${base}" (${probe.app}). ${reason}`, 'This is not configurable.');
+      }
+      if (tier === TIER.SHELL || looksLikeShellName(base)) {
+        return fail('open_blocked', `${path.basename(probe.path)} would open in "${base}" (${probe.app}), a shell, editor or interpreter: text typed there runs as the user, so Computer Use does not open documents in it.`,
+          'Read the file with the Read tool instead, or ask the user to open it themselves.');
+      }
+      via = ` with ${base}`;
+    } else if (probe.kind === 'file') {
+      via = ' (Windows did not name the handler: a Store app, or nothing is associated)';
+    }
     const before = await windowSet();
     let r;
     try { ({ result: r } = await driver.call('open', { path: target })); }
@@ -1129,11 +1152,11 @@ const handlers = {
       await sleep(250);
       const appeared = (await newWindowsSince(before)).filter((w) => !w.minimized && !w.popup);
       if (appeared.length) {
-        return text(`opened ${r.path} (${r.kind}) after ${Date.now() - started}ms: ${appeared.map(describeWindow).join('; ')}. ` +
+        return text(`opened ${r.path} (${r.kind})${via} after ${Date.now() - started}ms: ${appeared.map(describeWindow).join('; ')}. ` +
           'Read it with computer_snapshot; computer_grant before acting.');
       }
     }
-    return text(`opened ${r.path} (${r.kind}); no new window appeared within ${timeout}ms. A single-instance app (Word, Acrobat, a browser) ` +
+    return text(`opened ${r.path} (${r.kind})${via}; no new window appeared within ${timeout}ms. A single-instance app (Word, Acrobat, a browser) ` +
       'opens documents in the window it already has - call computer_apps and snapshot that window.');
   },
 

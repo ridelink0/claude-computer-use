@@ -179,6 +179,33 @@ console.log('\n-- Start-menu display names that are really a shell --');
   }
 }
 
+console.log('\n-- computer_open: the file type\'s handler is judged the way a launch is --');
+{
+  // These are executables AssocQueryString really returned on a Windows 11
+  // machine for .txt, .md, .xyz and .zip; open resolves the handler first and
+  // applies the same two refusals computer_launch applies to an app name.
+  const judge = (exe) => {
+    const base = exe.split(/[\\/]/).pop().replace(/\.exe$/i, '');
+    const { tier } = classify({ process: base, path: exe, title: '' });
+    return tier === TIER.BLOCKED ? 'blocked' : (tier === TIER.SHELL || looksLikeShellName(base)) ? 'shell' : 'ok';
+  };
+  check('a .txt handled by Notepad opens',
+    judge('C:\\Program Files\\WindowsApps\\Microsoft.WindowsNotepad_11.2607.14.0_x64__8wekyb3d8bbwe\\Notepad\\Notepad.exe') === 'ok');
+  check('a .md handled by VS Code is refused as shell tier',
+    judge('C:\\Users\\x\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe') === 'shell');
+  check('a type handed to an interpreter is refused',
+    judge('C:\\Python312\\pythonw.exe') === 'shell' && judge('C:\\Windows\\System32\\wscript.exe') === 'shell'
+    && judge('C:\\Program Files\\nodejs\\node.exe') === 'shell');
+  check('a type handed to PowerShell is refused',
+    judge('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe') === 'shell');
+  check('a type handed to KeePass is refused as blocked',
+    judge('C:\\Program Files\\KeePass\\KeePass.exe') === 'blocked');
+  check('an unregistered type resolves to the chooser, which is fine',
+    judge('C:\\WINDOWS\\system32\\OpenWith.exe') === 'ok');
+  check('a browser handler is allowed (sensitive, not shell)',
+    judge('C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe') === 'ok');
+}
+
 console.log('\n-- computer_key: which chords reach the shell is platform-specific --');
 {
   // Windows: the Windows-key aliases open Start, Search, Run, Settings.

@@ -88,6 +88,9 @@ namespace Axon
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
         [DllImport("user32.dll")] internal static extern bool GetGUIThreadInfo(uint tid, ref GUITHREADINFO info);
         [DllImport("user32.dll")] internal static extern bool ScreenToClient(IntPtr h, ref POINT p);
+        // Which executable the shell would run for a file type's "open" verb -
+        // the same association lookup ShellExecute makes, asked without running it.
+        [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)] internal static extern int AssocQueryStringW(uint flags, int str, string assoc, string extra, System.Text.StringBuilder outBuf, ref uint outLen);
         [StructLayout(LayoutKind.Sequential)]
         internal struct GUITHREADINFO
         {
@@ -3468,8 +3471,55 @@ namespace Axon
             ".rdp", ".kdbx", ".py", ".pyw", ".msc", ".settingcontent-ms", ".xll", ".chm", ".pfx", ".p12", ".iso", ".img", ".vhd", ".vhdx",
             ".application", ".gadget", ".ws", ".sct", ".diagcab", ".theme", ".deskthemepack", ".library-ms", ".search-ms", ".website", ".webloc", ".ps1xml", ".psd1", ".mst", ".msh" };
 
+        // The executable the shell would run for this extension's "open" verb,
+        // or null when Windows will not name one. A packaged (Store) app's
+        // association answers ERROR_NO_ASSOCIATION to this query even though a
+        // double-click opens the file (measured on Windows 11: .png, .jpg, .mp4),
+        // so null means "unknown", not "nothing". An unregistered extension
+        // resolves to OpenWith.exe, the chooser, which is what would run.
+        const uint ASSOCF_NOTRUNCATE = 0x20;
+        const uint ASSOCF_REMAPRUNDLL = 0x80;
+        const int ASSOCSTR_COMMAND = 1;
+        const int ASSOCSTR_EXECUTABLE = 2;
+
+        static string AssociatedExe(string ext)
+        {
+            if (string.IsNullOrEmpty(ext)) return null;
+            string exe = AssocString(ASSOCSTR_EXECUTABLE, ext);
+            if (exe != null) return exe;
+            // The executable query fails when the command's program is missing
+            // from disk (a stale association); the command itself still says
+            // what the shell would try to run, and that is what gets judged.
+            string cmd = AssocString(ASSOCSTR_COMMAND, ext);
+            if (cmd == null) return null;
+            cmd = cmd.TrimStart();
+            if (cmd.StartsWith("\""))
+            {
+                int q = cmd.IndexOf('"', 1);
+                return q > 1 ? cmd.Substring(1, q - 1) : null;
+            }
+            int sp = cmd.IndexOf(' ');
+            return sp > 0 ? cmd.Substring(0, sp) : cmd;
+        }
+
+        static string AssocString(int which, string ext)
+        {
+            try
+            {
+                System.Text.StringBuilder sb = new System.Text.StringBuilder(2048);
+                uint len = (uint)sb.Capacity;
+                int hr = Native.AssocQueryStringW(ASSOCF_NOTRUNCATE | ASSOCF_REMAPRUNDLL, which, ext, "open", sb, ref len);
+                if (hr != 0) return null;
+                string s = sb.ToString().Trim();
+                return s.Length == 0 ? null : s;
+            }
+            catch { return null; }
+        }
+
         // A document or folder in whatever the user's machine opens it with:
         // ShellExecute "open", the same thing a double-click in Explorer does.
+        // probe:true stops after the checks and the association lookup, so the
+        // server can judge the handler's tier before anything runs.
         static object OpOpen(Dictionary<string, object> a)
         {
             string path = Str(Get(a, "path"));
@@ -3485,6 +3535,11 @@ namespace Axon
                 throw new AxonError("open_blocked", "'" + ext + "' files run code; open is for documents and folders.",
                     "Use computer_launch for an application.");
             Dictionary<string, object> res = new Dictionary<string, object>();
+            string app = folder ? null : AssociatedExe(ext);
+            res["path"] = full;
+            res["kind"] = folder ? "folder" : "file";
+            res["app"] = app;
+            if (Bool(Get(a, "probe"), false)) return res;
             int pid = 0;
             try
             {
@@ -3503,8 +3558,6 @@ namespace Axon
                         "Open it from inside an application instead: computer_launch the app, File > Open, then computer_file_dialog with the path.");
                 throw new AxonError("open_failed", ex.Message, null);
             }
-            res["path"] = full;
-            res["kind"] = folder ? "folder" : "file";
             res["pid"] = pid;
             return res;
         }
