@@ -518,6 +518,12 @@ none of the three is in the tool list, and a `computer_run` step that names
 one (`paste`, `open`, `file_dialog`) gets `unsupported_on_macos` from the
 host, which says what to do instead.
 
+`computer_paste { files }` puts a real file drop on the clipboard - what
+Explorer's own Ctrl+C puts there - which attaches the file in a mail, a chat
+or a Word page. Whether a browser's bare upload box takes a pasted file is
+UNVERIFIED (no live test yet); a page's Browse button opens the OS picker,
+and `computer_file_dialog` drives that.
+
 ### When a window's tree is empty
 
 Accessibility is opt-in, at the application and at the OS, and switched off it

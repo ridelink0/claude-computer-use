@@ -405,8 +405,11 @@ in the same window means stop, tell the user, and agree who does what.
 - `computer_paste { files: ["C:\\docs\\brief.pdf"] }` pastes a **document**, not
   text: a file drop on the clipboard (what Explorer's own Ctrl+C puts there),
   then Ctrl+V, then the user's clipboard back. That attaches a file to a mail,
-  a chat, a Word page or a browser upload box. `{ file, as_text: true }` pastes
-  a text file's contents instead. Paths must exist; nothing is invented.
+  a chat or a Word page. A browser's bare upload box (`<input type=file>`) is
+  UNVERIFIED until a live test: Chromium hands a pasted file only to a page
+  that handles the paste event (a compose or chat box), so for a Browse
+  button open its picker and use `computer_file_dialog`. `{ file, as_text:
+  true }` pastes a text file's contents instead. Paths must exist; nothing is invented.
 - `computer_open { path }` opens a document or folder the way a double-click
   in Explorer does and waits for its window. Code-running extensions (.exe,
   .bat, .ps1, .lnk and the rest) are refused: an application goes through

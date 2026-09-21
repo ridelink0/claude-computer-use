@@ -3434,7 +3434,8 @@ namespace Axon
 
 
         // Files on the clipboard, then Ctrl+V - what a person does to attach a
-        // document to a mail, a chat, a Word page or a Chrome upload box, and the
+        // document to a mail, a chat or a Word page (a browser upload box on its own is
+        // UNVERIFIED), and the
         // paste a text clipboard cannot do. CF_HDROP is what Explorer's own Ctrl+C
         // puts there, so any app that accepts a file pasted from Explorer accepts
         // this. Same save-and-restore as the text paste.

@@ -372,7 +372,7 @@ const TOOLS = [
   },
   {
     name: 'computer_paste',
-    description: 'Ctrl+V into whatever holds the keyboard focus without touching the user\'s clipboard: it is saved before the paste and restored after. text pastes text. files pastes real files as a file drop (what Explorer\'s Ctrl+C puts on the clipboard), which attaches a document to a mail, a chat, a Word page or a browser upload box. file with as_text pastes that file\'s text contents instead.',
+    description: 'Ctrl+V into whatever holds the keyboard focus without touching the user\'s clipboard: it is saved before the paste and restored after. text pastes text. files pastes real files as a file drop (what Explorer\'s Ctrl+C puts on the clipboard), which attaches a document to a mail, a chat or a Word page (a browser upload box on its own is UNVERIFIED - drive its picker with computer_file_dialog). file with as_text pastes that file\'s text contents instead.',
     inputSchema: { type: 'object', properties: { text: str, file: str, files: { type: 'array', items: str }, as_text: { type: 'boolean' }, hwnd: int, title: str } },
   },
   {
