@@ -382,8 +382,8 @@ const TOOLS = [
   },
   {
     name: 'computer_file_dialog',
-    description: 'Drive the Windows Open/Save dialog an app has just shown: put a full path in its File name box and confirm. This is how a file is fetched from Explorer for an app, or attached to a page after its Upload button opened the picker. action: "save" allows a path that does not exist yet.',
-    inputSchema: { type: 'object', required: ['path'], properties: { path: str, action: { type: 'string', enum: ['open', 'save'] }, hwnd: int, title: str } },
+    description: 'Drive the Windows Open/Save dialog an app has just shown: put a full path in its File name box and confirm. This is how a file is fetched from Explorer for an app, or attached to a page after its Upload button opened the picker. action: "save" allows a path that does not exist yet. A confirm button labelled Upload, Send or the like is refused once like a click on it; confirmed: true after asking the user.',
+    inputSchema: { type: 'object', required: ['path'], properties: { path: str, action: { type: 'string', enum: ['open', 'save'] }, confirmed: { type: 'boolean' }, hwnd: int, title: str } },
   },
   {
     name: 'computer_status',
@@ -539,7 +539,9 @@ function targetName(args, hwnd) {
 const CONFIRM_ENABLED = !/^(off|false|0|no)$/i.test(String(process.env.CU_CONFIRM || '').trim());
 
 function consequenceCheck(op, args, hwnd, name) {
-  if (op !== 'click' || !name) return null;
+  // A click on a named control, or the file dialog's confirm button, which
+  // file_dialog presses by automation id and whose label is asked for first.
+  if ((op !== 'click' && op !== 'file_dialog') || !name) return null;
   // Codex's hand-off mode: some steps are the person's to take, whatever they
   // have said. Not switched off by the confirmation setting, not lifted by
   // confirmed:true.
@@ -1628,6 +1630,15 @@ async function act(op, args, describe) {
       }, { timeoutMs: 6000 });
       if (result && result.found && result.name) named = String(result.name);
     } catch { /* the click itself will report the real problem */ }
+  }
+  // file_dialog confirms with the dialog's button by id, so its label is read
+  // first: a picker whose Open button says "Upload" or "Send" is the same
+  // point of no return a click on that name would stop at.
+  if (op === 'file_dialog') {
+    try {
+      const { result } = await driver.call('file_dialog', { hwnd, path: args.path, action: args.action, probe: true }, { timeoutMs: 6000 });
+      if (result && result.button) named = String(result.button);
+    } catch { /* the real call will report the real problem */ }
   }
   const stop = consequenceCheck(op, args, hwnd, named);
   if (stop) return stop;

@@ -3590,6 +3590,19 @@ namespace Axon
             try { title = dlg.Current.Name; } catch { }
             IntPtr dlgHwnd = IntPtr.Zero;
             try { dlgHwnd = new IntPtr(dlg.Current.NativeWindowHandle); } catch { }
+            // probe:true reports the dialog and the label on its confirm button
+            // without touching anything, so the server can run that label through
+            // the consequence gate before the button is pressed by id: a picker
+            // whose Open button reads "Upload" or "Send" is a point of no return.
+            AutomationElement okButton = DialogOkButton(dlg);
+            string okLabel = null;
+            try { if (okButton != null) okLabel = CleanText(okButton.Current.Name); } catch { }
+            if (Bool(Get(a, "probe"), false))
+            {
+                res["dialog"] = title;
+                res["button"] = okLabel;
+                return res;
+            }
             GuardSameWindow(a, dlgHwnd);
             RequireForeground(dlgHwnd, a, res);
 
@@ -3651,9 +3664,7 @@ namespace Axon
             System.Threading.Thread.Sleep(60);
             // Confirm with the dialog's own button so a relabelled "Upload" or
             // "Select Folder" is still the right one; Enter in the box is the fallback.
-            AutomationElement ok = dlg.FindFirst(TreeScope.Children,
-                new AndCondition(new PropertyCondition(AutomationElement.AutomationIdProperty, "1"),
-                                 new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button)));
+            AutomationElement ok = okButton;
             bool invoked = false;
             object ip;
             if (ok != null && ok.TryGetCurrentPattern(InvokePattern.Pattern, out ip))
@@ -3675,7 +3686,8 @@ namespace Axon
             res["dialog"] = title;
             res["path"] = full;
             res["closed"] = closed;
-            res["method"] = (invoked ? "button" : "enter") + ", path by " + method;
+            res["button"] = okLabel;
+            res["method"] = (invoked ? "button \"" + (okLabel ?? "") + "\"" : "enter") + ", path by " + method;
             if (!closed)
             {
                 // A dialog that stayed open is usually asking something in a box
@@ -3705,6 +3717,19 @@ namespace Axon
                 catch { }
             }
             return res;
+        }
+
+        // The dialog's own confirm button: automation id 1 (IDOK), whatever the
+        // app has relabelled it - Open, Save, Upload, Select Folder.
+        static AutomationElement DialogOkButton(AutomationElement dlg)
+        {
+            try
+            {
+                return dlg.FindFirst(TreeScope.Children,
+                    new AndCondition(new PropertyCondition(AutomationElement.AutomationIdProperty, "1"),
+                                     new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button)));
+            }
+            catch { return null; }
         }
 
         // The visible common file dialog (window class #32770 with a File name box)
