@@ -4,6 +4,26 @@ Every released version, newest first, on the tag of the same name. Dates are the
 release commit's own. Anything marked UNVERIFIED was not exercised on real
 hardware at the time it shipped.
 
+## 0.9.3 - 2026-09-21
+
+From a live field test by another session on this machine, with the verbatim
+replies in hand:
+
+- `computer_launch` names the launched app's own window, not the first window
+  to appear. A Start-menu name is not a process name ("Opera Browser" runs as
+  opera), so nothing matched and the reply named Explorer's desktop-switch
+  preview and the user's editor as the launch while the real window turned up
+  on the next listing. Every word of the name is now a candidate, Explorer's
+  transient surfaces are never mistaken for the app, a session that restored
+  onto another virtual desktop is found in the hidden listing, and when only
+  unrelated windows appeared the reply says so instead of claiming a launch.
+- Concurrent `computer_apps { installed }` calls share one Start-menu listing
+  instead of each spawning a cold PowerShell; the ceiling is 25 seconds, and a
+  timeout is reported as a timeout rather than as "0 installed".
+- The skill says plainly that "work on a separate virtual desktop" cannot be
+  done from here on Windows and what to offer instead, rather than implying
+  the flow works and switching the user's screen.
+
 ## 0.9.2 - 2026-09-21
 
 - The file name box is found by automation id 1148 first and then by what it

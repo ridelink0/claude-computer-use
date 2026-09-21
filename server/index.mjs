@@ -590,33 +590,48 @@ function offDesktopCheck(win) {
 // the same way. Slow to ask (a PowerShell), so cached for a while.
 let startAppsCache = { at: 0, list: [] };
 
+// One PowerShell at a time. Get-StartApps takes 4.8 s on a cold shell here,
+// and two callers asking at once - a field test sent computer_apps
+// { installed: "opera" } and { installed: "chrome" } in parallel - each
+// spawned their own shell, both blew the old 8 s ceiling, and both reported
+// "0" for an app that is installed. Concurrent callers now share one listing
+// in flight, the ceiling covers a loaded machine, and a timeout is remembered
+// as a timeout so the caller can say that rather than "no match".
+let startAppsInflight = null;
+const START_APPS_TIMEOUT_MS = 25000;
 async function startApps() {
   if (process.platform !== 'win32') return [];
   if (Date.now() - startAppsCache.at < 5 * 60_000 && startAppsCache.list.length) return startAppsCache.list;
-  const out = await new Promise((resolve) => {
-    let s = '';
-    let done = false;
-    const finish = () => { if (!done) { done = true; resolve(s); } };
-    let p;
+  if (startAppsInflight) return startAppsInflight;
+  startAppsInflight = (async () => {
+    let timedOut = false;
+    const out = await new Promise((resolve) => {
+      let s = '';
+      let done = false;
+      const finish = () => { if (!done) { done = true; resolve(s); } };
+      let p;
+      try {
+        p = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+          'Get-StartApps | Select-Object Name,AppID | ConvertTo-Json -Compress'], { windowsHide: true });
+      } catch { finish(); return; }
+      p.stdout.on('data', (d) => { s += d; });
+      p.on('error', finish);
+      p.on('close', finish);
+      setTimeout(() => { if (!done) { timedOut = true; try { p.kill(); } catch { /* gone */ } finish(); } }, START_APPS_TIMEOUT_MS).unref();
+    });
+    let list = [];
     try {
-      p = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-        'Get-StartApps | Select-Object Name,AppID | ConvertTo-Json -Compress'], { windowsHide: true });
-    } catch { finish(); return; }
-    p.stdout.on('data', (d) => { s += d; });
-    p.on('error', finish);
-    p.on('close', finish);
-    setTimeout(() => { try { p.kill(); } catch { /* gone */ } finish(); }, 8000).unref();
-  });
-  let list = [];
-  try {
-    const j = JSON.parse(String(out || '').trim() || '[]');
-    list = (Array.isArray(j) ? j : [j])
-      .filter((x) => x && x.Name && x.AppID)
-      .map((x) => ({ name: String(x.Name), id: String(x.AppID) }))
-      .sort((x, y) => x.name.localeCompare(y.name));
-  } catch { list = []; }
-  startAppsCache = { at: Date.now(), list };
-  return list;
+      const j = JSON.parse(String(out || '').trim() || '[]');
+      list = (Array.isArray(j) ? j : [j])
+        .filter((x) => x && x.Name && x.AppID)
+        .map((x) => ({ name: String(x.Name), id: String(x.AppID) }))
+        .sort((x, y) => x.name.localeCompare(y.name));
+    } catch { list = []; }
+    startAppsCache = { at: Date.now(), list, timedOut };
+    return list;
+  })();
+  try { return await startAppsInflight; }
+  finally { startAppsInflight = null; }
 }
 
 function findStartApp(list, name) {
@@ -753,7 +768,13 @@ const handlers = {
       out += `\n\ninstalled apps${want && want !== '*' ? ` matching ${JSON.stringify(want)}` : ''}: ${hits.length}`
         + (hits.length ? '\n' + hits.slice(0, 200).map((a) => `  ${a.name}`).join('\n') : '')
         + (hits.length > 200 ? `\n  ... ${hits.length - 200} more; narrow the match` : '')
-        + (apps.length ? '\ncomputer_launch { app: "<name>" } starts one.' : (process.platform === 'win32' ? '\n(the Start-menu listing was empty or timed out)' : '\n(installed-app listing is Windows only)'));
+        + (apps.length
+          ? '\ncomputer_launch { app: "<name>" } starts one.'
+          : process.platform !== 'win32'
+            ? '\n(installed-app listing is Windows only)'
+            : startAppsCache.timedOut
+              ? `\n(the Start-menu listing timed out after ${START_APPS_TIMEOUT_MS / 1000} s, so this is not a "not installed" - the machine is busy; try again, or computer_launch { app: "<name>" } directly)`
+              : '\n(the Start-menu listing came back empty)');
     }
     return text(out);
   },
@@ -1062,15 +1083,34 @@ const handlers = {
     const timeout = Math.max(1000, Math.min(Number(args.timeout_ms) || 8000, 60000));
     const started = Date.now();
     const fgBefore = (await listWindows()).find((w) => w.foreground);
-    const sameApp = (w) => policy.key(w) === base.toLowerCase() || (w.process || '').toLowerCase() === base.toLowerCase();
+    // A Start-menu name is not a process name: "Opera Browser" runs as opera,
+    // "Visual Studio Code" as Code. Matching the whole name against the
+    // process matched nothing, so the first windows to appear were reported
+    // as the launch - in a field test those were Explorer's desktop-switch
+    // preview and the user's own editor, while the real window turned up on
+    // the next listing. Every word of the name is a candidate, and a window
+    // counts as the app's when its process and a word contain each other.
+    const tokens = [base, ...(startApp ? String(startApp.name).split(/[\s-]+/) : [])]
+      .map((t) => t.toLowerCase().replace(/\.exe$/, '')).filter((t) => t.length >= 3);
+    const sameApp = (w) => {
+      const k = String(policy.key(w) || '').toLowerCase();
+      const p = String(w.process || '').toLowerCase();
+      return tokens.some((t) => k === t || p === t || (p.length >= 3 && (t.includes(p) || p.includes(t))));
+    };
     const via = startApp ? ` (Start-menu app "${startApp.name}")` : '';
+    let others = [];
     while (Date.now() - started < timeout) {
       await sleep(250);
       const appeared = (await newWindowsSince(before)).filter((w) => !w.minimized && !w.popup);
-      if (appeared.length) {
-        return text(`launched "${app}"${via} after ${Date.now() - started}ms: ${appeared.map(describeWindow).join('; ')}. ` +
+      const mine = appeared.filter(sameApp);
+      if (mine.length) {
+        return text(`launched "${app}"${via} after ${Date.now() - started}ms: ${mine.map(describeWindow).join('; ')}. ` +
           'Read it with computer_snapshot; computer_grant before acting.');
       }
+      // Windows that appeared but are not the app: the shell's own transient
+      // surfaces (a desktop-switch preview) and whatever a session restore or
+      // the user brought forward. Remembered, never mistaken for the launch.
+      others = appeared.filter((w) => !/^explorer$/i.test(String(w.process || '')));
       // Single-instance apps (Notepad, Calculator, most browsers) open a tab
       // or a document in the window they already have, and bring it forward.
       if (Date.now() - started > 1200) {
@@ -1081,10 +1121,15 @@ const handlers = {
         }
       }
     }
-    const existing = (await listWindows({ fresh: true })).filter((w) => sameApp(w) && !policy.isSelf(w));
+    const existing = (await listWindows({ fresh: true, includeHidden: true })).filter((w) => sameApp(w) && !policy.isSelf(w));
     if (existing.length) {
       return text(`No new window appeared within ${timeout}ms, but "${app}" is running: ${existing.map(describeWindow).join('; ')}. ` +
-        'It probably opened a tab or document there. Read it with computer_snapshot.');
+        'It probably opened a tab or document there, or restored a window on another virtual desktop. Read it with computer_snapshot.');
+    }
+    if (others.length) {
+      return fail('launch_timeout', `No window of "${app}" appeared within ${timeout}ms; ${others.length} other window(s) did (${others.map(describeWindow).join('; ')}), ` +
+        'which is not the launch - a session restore, the shell, or something the user opened.',
+        'Call computer_apps { include_hidden: true } and look for the app by its process; it may have restored onto another virtual desktop.');
     }
     return fail('launch_timeout', `No new window appeared within ${timeout}ms after starting "${app}".`,
       'It may still be starting, or the name may be wrong. Call computer_apps.');

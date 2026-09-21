@@ -381,6 +381,16 @@ in the same window means stop, tell the user, and agree who does what.
 - A window on another virtual desktop lists with `[other virtual desktop]`, and
   only its frame is readable - that is Windows, not a broken or empty app. Do
   not click at its coordinates; they belong to whatever is in front of the user.
+- **"Work on a separate virtual desktop" cannot be done from here, and saying
+  so beats pretending.** There is no desktop tool, Windows-key chords are
+  refused, and even with a spare desktop made by hand the OS serves only the
+  frame of a window the user is not looking at, so every read, click and
+  keystroke on it either fails or switches the user's screen to it - which is
+  the one thing the rule exists to prevent. If the user's standing order is a
+  separate desktop, say plainly at the start that it is not possible on
+  Windows, and offer what is: `background: true` typing and pattern clicks into
+  a window behind theirs on the desktop they are on, or waiting for them to
+  step away. Never send Win+Ctrl+D or Win+Ctrl+Left/Right by any other route.
 - Several monitors just work; pass `hwnd` to `computer_screenshot` to capture one
   window rather than every display. A window that is partly behind another is
   captured as it renders itself, not as the screen shows it; the caption says
