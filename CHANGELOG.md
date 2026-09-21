@@ -4,6 +4,22 @@ Every released version, newest first, on the tag of the same name. Dates are the
 release commit's own. Anything marked UNVERIFIED was not exercised on real
 hardware at the time it shipped.
 
+## 0.9.5 - 2026-09-21
+
+- A Stop hook reads the reply about to be handed back and, when it lists a job
+  on this computer that the plugin can do - read a settings panel, close a
+  window, open an app, click a thing - blocks the turn once with the rule: do
+  it now and report, a completed action is not a follow-up, leave a step to
+  the user only when it needs their credentials or consent or has no GUI or
+  CLI path. Once per session, never twice in a row, nothing on turns that do
+  not match. Two such items were handed back at the end of a long task today.
+- The skill description names the cases that were missed - a settings panel
+  read to confirm a path, a stray window on another virtual desktop - and the
+  words a user actually types, per Anthropic guidance that skills undertrigger
+  and descriptions should push. The three-line rule is in the skill body.
+- close_window waits up to three seconds before calling a window still open.
+  The research: docs/research/2026-09-21-dr-when-to-use-computer-use.md.
+
 ## 0.9.4 - 2026-09-21
 
 - A blind tree is not a dead end: when a snapshot comes back blind and the

@@ -1,6 +1,6 @@
 ---
 name: computer-use
-description: Use any time something on this computer needs looking at or operating - reading what a window says, checking whether an app is open or what state it is in, clicking, typing, filling a form, testing a GUI, confirming a change actually rendered, or driving any app with no CLI or API. Also whenever the user points at something on their screen or names an application. Windows and macOS; reads windows without disturbing them and can work while the user keeps working.
+description: Use any time something on this computer needs looking at or operating instead of being left for the user to do by hand - reading what a window, dialog or menu says; reading a settings or preferences panel inside an app to confirm a value such as a config file path; checking whether an app is open or what state it is in; clicking, typing, filling a form, testing a GUI, confirming a change rendered; opening or closing a window, including a stray window on another virtual desktop (a close works there without switching the user's screen); or driving any app with no CLI or API. Also whenever the user names an application, a window or a settings screen, or says look at my screen, open X, close X, click X. Before listing anything as for the user to do, check it against this skill first. Windows and macOS; reads windows without disturbing them, and can work while the user keeps working.
 ---
 
 # Computer Use
@@ -445,3 +445,14 @@ in the same window means stop, tell the user, and agree who does what.
   says so. Everything else still needs `computer_grant`.
 - `computer_status` lists running background tasks and what this session has
   spent on reads and screenshots.
+
+## Before you hand anything back
+
+Before any step is written under "for you to do", "left for you" or "you will
+need to", ask: can this plugin do it directly - read it, click it, open it,
+close it? If yes, do it now and report what happened; a completed action is
+not a follow-up. Leave a step to the user only when it needs their credentials
+or consent (a blocked or hand-off tier), or has no GUI or CLI path at all.
+Reading an app's settings panel to confirm a value is a snapshot; a stray
+window on another virtual desktop closes from here without switching the
+user's screen. A Stop hook checks the reply for this and blocks it once.

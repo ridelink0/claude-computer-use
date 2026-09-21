@@ -7,8 +7,20 @@
             "type": "mcp_tool",
             "server": "plugin:computer-use:computer-use",
             "tool": "computer_turn_ended",
-            "input": { "session_id": "${session_id}", "reason": "stop" },
+            "input": {
+              "session_id": "${session_id}",
+              "reason": "stop"
+            },
             "timeout": 20
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/handback.mjs\" \"${CLAUDE_PLUGIN_DATA}\"",
+            "timeout": 5
           }
         ]
       }
@@ -20,7 +32,10 @@
             "type": "mcp_tool",
             "server": "plugin:computer-use:computer-use",
             "tool": "computer_turn_ended",
-            "input": { "session_id": "${session_id}", "reason": "api_error" },
+            "input": {
+              "session_id": "${session_id}",
+              "reason": "api_error"
+            },
             "timeout": 20
           }
         ]
