@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // This suite deletes the bin directory. A live Claude Code session runs its
 // host from the shared one, so the test builds into a directory of its own.
@@ -46,6 +47,19 @@ const forced = ensureHost({ force: true, log: () => {} });
 check('force rebuilds', forced.rebuilt === true);
 check('force keeps the same content address', forced.exe === first.exe);
 check('old binaries are pruned', exes().length === 1, exes().join(','));
+
+console.log('\n-- manifest and marketplace agree --');
+{
+  // 0.8.2 shipped with the marketplace entry still saying 0.8.1, and 0.9.0
+  // with it saying 0.8.2; plugin.json wins at install time and the entry is
+  // silently ignored, so the drift shows nowhere but here.
+  const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'plugin.json'), 'utf8'));
+  const market = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8'));
+  const entry = (market.plugins || []).find((p) => p.name === manifest.name);
+  check('marketplace lists the plugin', !!entry);
+  check('marketplace entry version matches plugin.json', !!entry && entry.version === manifest.version, `${entry && entry.version} vs ${manifest.version}`);
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) { console.log('failures: ' + failures.join(', ')); process.exit(1); }

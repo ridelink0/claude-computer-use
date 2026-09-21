@@ -613,10 +613,10 @@ will fix it.
 ```
 node tools/test-all.mjs        every suite below
 node tools/verify.mjs           33  drives real windows end to end, cursor never moves
-node tools/policy-test.mjs      70  tiers, grants, refusals, what needs confirming
+node tools/policy-test.mjs     113  tiers, grants, refusals, what needs confirming, what open may hand a file to
 node tools/sessions-test.mjs    48  two Claudes: slots, the input lease, dead sessions
 node tools/presence-test.mjs    32  telling you apart from Computer Use, overlay, banner
-node tools/build-test.mjs       13  compile, idempotence, concurrent builds
+node tools/build-test.mjs       15  compile, idempotence, concurrent builds, manifest and marketplace versions agree
 node tools/host-test.mjs        57  tree, patterns, input, crash recovery
 node tools/mcp-test.mjs         66  the protocol end to end, prints token costs
 node tools/batch-test.mjs       66  stable indices, deltas, find, waits, runs, tasks, posted input, launch
