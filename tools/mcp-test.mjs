@@ -44,13 +44,34 @@ class Client {
   stop() { try { this.proc.kill(); } catch {} }
 }
 
+// The target's first act is loading the WinForms and Drawing assemblies, which
+// is fast on an idle machine - 4.3 s measured here - and slow on a loaded one,
+// the same PowerShell cold-start cost that makes a scheduled-task registration
+// take half a minute. A fixed 15 s ceiling therefore failed this suite whenever
+// anything else was running, which reads as a defect in the plugin and is not
+// one. The ceiling is generous and the wait is printed, so a genuinely stuck
+// target still fails while a merely busy machine says so.
+const TARGET_TIMEOUT_MS = Number(process.env.COMPUTER_USE_TARGET_TIMEOUT_MS) || 60000;
+
 function spawnTarget() {
   return new Promise((resolve, reject) => {
+    const started = Date.now();
     const p = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', TARGET],
       { stdio: ['ignore', 'pipe', 'pipe'] });
-    const t = setTimeout(() => reject(new Error('target never reported in')), 15000);
+    const t = setTimeout(() => {
+      try { p.kill(); } catch {}
+      reject(new Error(`target never reported in within ${TARGET_TIMEOUT_MS} ms (COMPUTER_USE_TARGET_TIMEOUT_MS raises it)`));
+    }, TARGET_TIMEOUT_MS);
     createInterface({ input: p.stdout }).on('line', (l) => {
-      try { const i = JSON.parse(l.trim()); if (i.title) { clearTimeout(t); resolve({ proc: p, ...i }); } } catch {}
+      try {
+        const i = JSON.parse(l.trim());
+        if (i.title) {
+          clearTimeout(t);
+          const waited = Date.now() - started;
+          if (waited > 10000) console.log(`     target took ${(waited / 1000).toFixed(1)} s to appear; the machine is busy`);
+          resolve({ proc: p, ...i });
+        }
+      } catch {}
     });
     p.stderr.on('data', (d) => console.error('target stderr:', d.toString().trim()));
   });
