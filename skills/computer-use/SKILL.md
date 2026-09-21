@@ -180,8 +180,24 @@ snapshot shows the page's links, buttons and fields by name, the URL in its
 header, and the tabs. The browser's own toolbar and sidebar are hidden unless
 you pass `chrome: true`. Fill a field with `computer_type { index, replace: true }`
 and click with `computer_click`; neither needs the window in front. If Claude in
-Chrome is set up in this session, prefer its tools for a page in Chrome; the
-tree here is the path when it is not, and for every other browser.
+Chrome is set up in this session (`claude --chrome`, or `/chrome`), its tools
+own the page: navigate, read, find, click, type, and file uploads, which it does
+by reading the file itself and setting it on the page's input, never through
+the OS picker. This plugin owns what the extension cannot reach, and the two
+hand off at the window edge:
+
+| The extension cannot | This plugin does |
+|---|---|
+| Drive the OS Open/Save dialog a page or app opened | `computer_file_dialog { hwnd, path }` puts the path in and confirms |
+| Attach a file by pasting it | `computer_paste { files: [...] }` puts a real file drop on the clipboard, then Ctrl+V |
+| Open a document on disk in its own app | `computer_open { path }`, then snapshot the window that appeared |
+| See any window that is not a Chrome page: Explorer, the download shelf's target folder, a print dialog, a native prompt | `computer_apps`, `computer_snapshot`, `computer_run` |
+| Keep working while the user types (it steals focus across the OS - a documented complaint) | the coexistence gate: it waits for a gap in the user's input |
+
+When the extension is not connected, or for every other browser, the tree
+here is the path. `docs/research/2026-09-20-chrome-and-file-dialogs.md` has
+the extension's tool surface, its known failures, and the file-dialog
+automation ids with their sources.
 
 ### Go to a URL
 
@@ -386,6 +402,24 @@ in the same window means stop, tell the user, and agree who does what.
   back. Never `computer_clipboard` then `ctrl+v`: that throws away whatever the
   user had copied, and they will find out at the worst moment. Windows only for
   now; it is also a `computer_run` step (`{paste: "..."}`).
+- `computer_paste { files: ["C:\\docs\\brief.pdf"] }` pastes a **document**, not
+  text: a file drop on the clipboard (what Explorer's own Ctrl+C puts there),
+  then Ctrl+V, then the user's clipboard back. That attaches a file to a mail,
+  a chat, a Word page or a browser upload box. `{ file, as_text: true }` pastes
+  a text file's contents instead. Paths must exist; nothing is invented.
+- `computer_open { path }` opens a document or folder the way a double-click
+  in Explorer does and waits for its window. Code-running extensions (.exe,
+  .bat, .ps1, .lnk and the rest) are refused: an application goes through
+  `computer_launch`. A single-instance app (Word, Acrobat, a browser) opens
+  the document in the window it already has; the reply says so, so snapshot
+  that window rather than waiting for a new one.
+- `computer_file_dialog { hwnd, path }` drives the Windows Open/Save dialog an
+  app has just shown - after Ctrl+O, Ctrl+S, an Upload or a Browse button -
+  by its own ids: the path goes into the File name box and the dialog's own
+  button confirms. It reports whether the dialog closed; if it did not, it is
+  asking something (overwrite, not found), so snapshot it. `action: "save"`
+  allows a path that does not exist yet. The Office and Adobe pickers are not
+  this dialog: drive those by snapshot like any window. Windows only.
 - **BLIND TREE** at the top of a snapshot means the window's tree is empty for
   a reason, and the note says which: an Electron app whose renderer bridge is
   off (start it with `--force-renderer-accessibility`), a page or surface drawn

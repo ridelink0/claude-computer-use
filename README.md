@@ -437,6 +437,9 @@ computer_run { hwnd, steps: [...] }           every stretch of known actions, on
 computer_click { index: 12 }                 one action whose result you must see first
 computer_clipboard                           read it; { text } sets it
 computer_paste { text }                      ctrl+v, and your clipboard survives
+computer_paste { files: [...] }             paste a document as a file drop; { file, as_text } pastes its text
+computer_open { path }                       open a document or folder in its default app, wait for the window
+computer_file_dialog { hwnd, path }          drive the Open/Save dialog an app showed: path in, confirm
 ```
 
 In a browser the snapshot is the page: its URL in the header, the tabs, and
