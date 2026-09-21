@@ -73,7 +73,13 @@ async function main() {
   console.log('\n-- always-on cost --');
   const { tools } = await c.rpc('tools/list');
   const schemaTokens = tok(JSON.stringify(tools));
-  console.log(`     ${tools.length} tools, schema ~${schemaTokens} tokens (paid every turn)`);
+  // Claude Code keeps the tool names (listed as deferred tools, under the
+  // server's prefix) and the server note in front of the model every turn
+  // and loads a tool's schema on first use, so the always-on cost is the
+  // names and the note, not the schemas. One token per four characters.
+  const namesTokens = tok(JSON.stringify(tools.map((t) => 'mcp__plugin_computer-use_computer-use__' + t.name)));
+  const noteTokens = tok(String(init.instructions || ''));
+  console.log(`     ${tools.length} tools, schema ~${schemaTokens} tokens (loaded on first use); names + server note ~${namesTokens + noteTokens} tokens (always on)`);
   check('tools listed', tools.length > 0);
   check('all tools namespaced computer_', tools.every((t) => t.name.startsWith('computer_')));
   check('no tool collides with built-in computer use',
@@ -346,7 +352,8 @@ async function main() {
   try { target.proc.kill(); } catch {}
 
   console.log(`\n== cost summary ==`);
-  console.log(`  always-on schemas : ~${schemaTokens} tokens`);
+  console.log(`  always-on         : ~${namesTokens + noteTokens} tokens (tool names + server note)`);
+  console.log(`  tool schemas      : ~${schemaTokens} tokens (loaded on first use)`);
   console.log(`  window list       : ~${tok(appsText)} tokens`);
   console.log(`  snapshot (full)   : ~${snapTokens} tokens`);
   console.log(`  snapshot (lean)   : ~${leanTokens} tokens`);

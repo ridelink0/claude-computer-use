@@ -492,10 +492,13 @@ result says `exclusive_unavailable`. Escape releases it regardless. It is
 opt-in and never the default, precisely because a locked-out user cannot reach
 the Stop button — Escape is why it is safe to offer at all.
 
-Sixteen tool names and a short server note are the always-on cost, about
-**340 tokens**; the schemas load on first use (about 2,400) and again after a
-compaction. One screenshot you did
-not take pays for that four times over.
+Twenty-three tool names and the server note are the always-on cost, about
+**480 tokens**; the schemas load on first use (about 3,430) and again
+after a compaction. Both are what `node tools/mcp-test.mjs` measures, on this
+machine at 0.9.1: the JSON of `tools/list` for the schemas, and the names as
+Claude Code lists a deferred tool (under the server's prefix) plus the server
+note for the always-on part, at one token per four characters. One screenshot
+you did not take (about 10,000 tokens) pays for the schemas three times over.
 
 ### Clipboard
 
