@@ -445,8 +445,18 @@ check('every op a tool dispatches exists in both hosts, or the tool is platform-
   const swift = fs.readFileSync(path.join(ROOT, 'server', 'native', 'AxonHost.swift'), 'utf8');
   const cs = fs.readFileSync(path.join(ROOT, 'server', 'native', 'AxonHost.cs'), 'utf8');
   assert.ok(/case "paste": return OpPaste\(a\)/.test(cs), 'the C# host dispatches paste');
-  const swiftHasPaste = /case "paste"/.test(swift);
-  const gated = /TOOLS\.filter\(\(t\) => t\.name !== 'computer_paste'\)/.test(idx);
+  // The Swift host now answers open, file_dialog, paste and paste_files with
+  // unsupported_on_macos, so that a run step naming one fails with a sentence
+  // instead of an unknown-op. That is a refusal, not an implementation, and it
+  // must not read as parity here: what would make this tool safe to list on
+  // macOS is a paste that pastes.
+  const swiftRefuses = /case [^\n]*"paste"[^\n]*:\s*[\s\S]{0,200}?unsupported_on_macos/.test(swift);
+  const swiftHasPaste = /case "paste"/.test(swift) && !swiftRefuses;
+  // The gate has been written two ways - a single !== test, and a list of the
+  // Windows-only names - so this matches the line that builds the list rather
+  // than one spelling of it.
+  const gateLine = (idx.match(/const tools = [^\n]*\n/) || [''])[0];
+  const gated = /filter/.test(gateLine) && /computer_paste/.test(gateLine);
   assert.ok(swiftHasPaste || gated, 'macOS has no paste op, so computer_paste must not be listed there');
   assert.ok(!(swiftHasPaste && gated), 'the Swift host implements paste now - drop the platform gate in tools/list');
 });
@@ -573,9 +583,26 @@ try {
     // So the slack is deliberately smaller than one tool costs: wording can be
     // edited freely, and nothing new can be added without this line failing and
     // the next person having to make the same argument in writing.
+    //
+    // Fourth move, 3075 to 3425, for computer_open and computer_file_dialog.
+    // The argument, since the line demands one. Before them a document on disk
+    // was unreachable: the plugin could read and drive a window but could not
+    // open the file that window is for, could not answer the Open/Save dialog
+    // an app puts up, and could not attach a file to anything - the three
+    // things asked for most, and the three Claude in Chrome cannot do either,
+    // because they are outside the page. Folding them into existing tools was
+    // tried first and does not hold: computer_launch starts an application and
+    // is gated on that application's own name, while open has to resolve the
+    // file's handler and refuse an editor or an interpreter, a different
+    // question with a different answer; and a dialog cannot be driven by
+    // computer_click, because the path goes into a box whose value must be
+    // read back before the button is pressed. Both descriptions were cut
+    // first - 3431 measured, 3398 after - so what is bought here is the two
+    // tools, not their wording. Slack stays 27 tokens, a third of what the
+    // cheapest tool costs.
     const tok = Math.round(chars / 4);
-    assert.ok(tok <= 3075, `schema ~${tok} tokens - over the always-on ceiling. Trim a description or argue the raise in the comment above; do not just move the number.`);
-    console.log(`       schema ~${tok} tokens (ceiling 3075)`);
+    assert.ok(tok <= 3425, `schema ~${tok} tokens - over the always-on ceiling. Trim a description or argue the raise in the comment above; do not just move the number.`);
+    console.log(`       schema ~${tok} tokens (ceiling 3425)`);
     const task = list.result.tools.find((t) => t.name === 'computer_task');
     assert.ok(task.inputSchema.properties.steps);
   });

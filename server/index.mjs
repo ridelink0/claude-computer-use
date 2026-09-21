@@ -377,12 +377,12 @@ const TOOLS = [
   },
   {
     name: 'computer_open',
-    description: 'Open a document or folder in whatever this machine opens it with (a double-click in Explorer), then wait for its window. Documents and folders only; an application goes through computer_launch, and a file whose handler is a blocked or shell-tier app (an editor, an interpreter) is refused.',
+    description: 'Open a document or folder the way a double-click in Explorer does, then wait for its window. Documents and folders only: an application goes through computer_launch, and a file whose handler is a blocked or shell app is refused.',
     inputSchema: { type: 'object', required: ['path'], properties: { path: str, timeout_ms: int } },
   },
   {
     name: 'computer_file_dialog',
-    description: 'Drive the Windows Open/Save dialog an app has just shown: put a full path in its File name box and confirm. This is how a file is fetched from Explorer for an app, or attached to a page after its Upload button opened the picker. action: "save" allows a path that does not exist yet. A confirm button labelled Upload, Send or the like is refused once like a click on it; confirmed: true after asking the user.',
+    description: 'Drive the Windows Open/Save dialog an app has just shown: put a full path in its File name box and confirm. That is how a file is fetched for an app, or attached after an Upload button opened the picker. action "save" allows a path that does not exist yet; a confirm button labelled Upload or Send is refused once, then confirmed: true.',
     inputSchema: { type: 'object', required: ['path'], properties: { path: str, action: { type: 'string', enum: ['open', 'save'] }, confirmed: { type: 'boolean' }, hwnd: int, title: str } },
   },
   {

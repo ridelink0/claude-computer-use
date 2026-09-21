@@ -3607,10 +3607,9 @@ namespace Axon
             GuardSameWindow(a, dlgHwnd);
             RequireForeground(dlgHwnd, a, res);
 
-            AutomationElement box = dlg.FindFirst(TreeScope.Descendants,
-                new PropertyCondition(AutomationElement.AutomationIdProperty, "1148"));
+            AutomationElement box = FindFileNameBox(dlg);
             if (box == null)
-                throw new AxonError("no_filename_box", "The dialog has no File name box (automation id 1148), so it is not the Windows common dialog.",
+                throw new AxonError("no_filename_box", "The dialog has no File name box - no automation id 1148, and no writable field named for the file name - so it is not a Windows file picker this can drive.",
                     "Snapshot it and drive it with click and type.");
             // A value write that is accepted and then ignored is the common failure
             // of this dialog, so every write is read back before it is believed.
@@ -3640,14 +3639,25 @@ namespace Axon
                 try { (edit ?? box).SetFocus(); } catch { }
                 System.Threading.Thread.Sleep(40);
                 bool focused = false;
+                // The focused element is the box itself, or a child of it, so
+                // the walk up is compared against the box that was actually
+                // found rather than against the id 1148 alone - a dialog whose
+                // box carries another id would otherwise be typed into and then
+                // reported as a focus failure.
+                int[] boxId = null;
+                int[] editId = null;
+                try { boxId = box.GetRuntimeId(); } catch { }
+                try { if (edit != null) editId = edit.GetRuntimeId(); } catch { }
                 try
                 {
                     AutomationElement walk = AutomationElement.FocusedElement;
                     for (int i = 0; walk != null && i < 6 && !focused; i++)
                     {
                         string aid = null;
+                        int[] rid = null;
                         try { aid = walk.Current.AutomationId; } catch { }
-                        if (aid == "1148") focused = true;
+                        try { rid = walk.GetRuntimeId(); } catch { }
+                        if (aid == "1148" || SameRuntimeId(rid, boxId) || SameRuntimeId(rid, editId)) focused = true;
                         else walk = TreeWalker.ControlViewWalker.GetParent(walk);
                     }
                 }
@@ -3737,6 +3747,74 @@ namespace Axon
         // owned by the given window - directly, or through the hidden owner some
         // apps park between themselves and their dialogs - or any one when no
         // owner is given.
+        // The File name box is automation id 1148 in the Windows common dialog,
+        // and that id is what every published recipe keys on. It is not a
+        // contract: the id is the old Win32 control id carried forward, and a
+        // host that hands UI Automation a different tree - a packaged app, a
+        // localised or reskinned picker, a dialog whose box sits under a sink
+        // element of its own - shows a box with another id or none. Keying on
+        // 1148 alone turned those into "this is not the Windows common dialog"
+        // while the box sat there in plain sight, so the id is tried first and
+        // then the box is recognised by what it is: an editable field that
+        // takes a value.
+        // A UI Automation runtime id is an int array and is only meaningful
+        // compared element to element, which is exactly what the focus proof
+        // needs: is the thing holding the keyboard the box we found.
+        static bool SameRuntimeId(int[] a, int[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+            return true;
+        }
+
+        static AutomationElement FindFileNameBox(AutomationElement dialog)
+        {
+            if (dialog == null) return null;
+            AutomationElement box = null;
+            try
+            {
+                box = dialog.FindFirst(TreeScope.Descendants,
+                    new PropertyCondition(AutomationElement.AutomationIdProperty, "1148"));
+            }
+            catch { }
+            if (box != null) return box;
+            foreach (ControlType type in new ControlType[] { ControlType.ComboBox, ControlType.Edit })
+            {
+                AutomationElementCollection found = null;
+                try
+                {
+                    found = dialog.FindAll(TreeScope.Descendants,
+                        new PropertyCondition(AutomationElement.ControlTypeProperty, type));
+                }
+                catch { continue; }
+                if (found == null) continue;
+                // Named for the file name first - the shape the classic dialog
+                // uses - and only then any writable field.
+                foreach (AutomationElement e in found)
+                {
+                    string name = null;
+                    bool enabled = true;
+                    try { name = e.Current.Name; } catch { }
+                    try { enabled = e.Current.IsEnabled; } catch { }
+                    if (!enabled || name == null) continue;
+                    if (name.IndexOf("file name", StringComparison.OrdinalIgnoreCase) >= 0) return e;
+                }
+                foreach (AutomationElement e in found)
+                {
+                    bool enabled = true;
+                    try { enabled = e.Current.IsEnabled; } catch { }
+                    if (!enabled) continue;
+                    object pattern;
+                    if (e.TryGetCurrentPattern(ValuePattern.Pattern, out pattern))
+                    {
+                        try { if (((ValuePattern)pattern).Current.IsReadOnly) continue; } catch { }
+                        return e;
+                    }
+                }
+            }
+            return null;
+        }
+
         static AutomationElement FindFileDialog(IntPtr owner)
         {
             AutomationElementCollection dialogs = AutomationElement.RootElement.FindAll(TreeScope.Children,
@@ -3752,7 +3830,7 @@ namespace Axon
                     bool mine = o == owner || (o != IntPtr.Zero && Native.GetWindowRel(o, 4) == owner);
                     if (!mine) continue;
                 }
-                if (d.FindFirst(TreeScope.Descendants, new PropertyCondition(AutomationElement.AutomationIdProperty, "1148")) == null) continue;
+                if (FindFileNameBox(d) == null) continue;
                 return d;
             }
             return null;

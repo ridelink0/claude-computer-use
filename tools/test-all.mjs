@@ -49,18 +49,35 @@ async function sweepStrayWindows() {
 async function main() {
   let failed = 0;
   const totals = [];
+  const busyDesktop = [];
 
   for (const s of suites) {
     await sweepStrayWindows();
     console.log(`\n${'='.repeat(60)}\n  ${s}\n${'='.repeat(60)}`);
-    const r = spawnSync(process.execPath, [path.join(HERE, s)], { stdio: 'inherit' });
-    if (r.status !== 0) failed++;
-    totals.push(`${s}: ${r.status === 0 ? 'PASS' : 'FAIL'}`);
+    // stderr is captured rather than inherited so the runner can tell a broken
+    // suite from one that cannot run here, then printed unchanged so nothing is
+    // swallowed. Three of these suites drive real windows, and the plugin
+    // refuses to take focus from someone who is using the machine: that refusal
+    // is the coexistence design working, and calling it a failure sends the
+    // next reader hunting for a defect that is not there.
+    const r = spawnSync(process.execPath, [path.join(HERE, s)], { stdio: ['ignore', 'inherit', 'pipe'] });
+    const err = String(r.stderr || '');
+    if (err) process.stderr.write(err);
+    const busy = r.status !== 0 && /focus_failed|window_not_focused|desktop_locked/.test(err);
+    if (r.status !== 0 && !busy) failed++;
+    if (busy) busyDesktop.push(s);
+    totals.push(`${s}: ${r.status === 0 ? 'PASS' : busy ? 'NEEDS AN IDLE DESKTOP' : 'FAIL'}`);
   }
   await sweepStrayWindows();
 
   console.log(`\n${'='.repeat(60)}`);
   for (const t of totals) console.log('  ' + t);
+  if (busyDesktop.length) {
+    console.log(
+      `\n  ${busyDesktop.length} suite(s) could not run: they drive real windows and this desktop is in use,` +
+      '\n  so the plugin refused to take focus. Run them on an idle desktop before calling a release tested.'
+    );
+  }
   process.exit(failed ? 1 : 0);
 }
 

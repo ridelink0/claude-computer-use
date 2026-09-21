@@ -634,6 +634,12 @@ registry that cannot be written to, a window parked under the banner, a tree too
 slow to finish reading, typing that would have landed in the wrong window, and
 every error code.
 
+## What changed, and when
+
+[CHANGELOG.md](CHANGELOG.md) has every released version with the tag it sits
+on, newest first, and says plainly which parts have not been run on real
+hardware.
+
 ## Where the idea came from
 
 This is a study of what makes Codex's computer use good, rebuilt from scratch.
