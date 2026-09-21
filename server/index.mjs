@@ -1592,7 +1592,7 @@ const handlers = {
     windowCacheAt = 0;
     sessions.heartbeat({ last_op: 'close_window', last_at: Date.now(), last_hwnd: Number(win.hwnd), last_title: win.title || null });
     return text(sessions.note(Number(win.hwnd)) + (result.still_open
-      ? `sent close to "${result.closed}" but it is still open - the app is probably asking whether to save.`
+      ? `sent close to "${result.closed}" but it is still open after 3 s - the app is asking something (save? close all tabs?), or it is slow; list windows again before acting on it.`
       : `closed "${result.closed}".`) + autoGrantNote(check));
   },
 };

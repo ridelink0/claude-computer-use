@@ -3125,7 +3125,12 @@ namespace Axon
             // Posted, not sent: a window whose thread is busy - or a packaged
             // app behind its frame host - must not hold this host hostage.
             Native.PostMessageW(h, 0x0010, IntPtr.Zero, IntPtr.Zero);
-            for (int i = 0; i < 8 && Native.IsWindow(h); i++) System.Threading.Thread.Sleep(100);
+            // Up to three seconds, returning the moment the window is gone. The
+            // old ceiling was 800 ms, and a browser closing its last window on
+            // another virtual desktop took longer than that: the reply said the
+            // app was "probably asking whether to save" while the window was
+            // already closing, and the next listing showed it gone.
+            for (int i = 0; i < 30 && Native.IsWindow(h); i++) System.Threading.Thread.Sleep(100);
 
             Dictionary<string, object> res = new Dictionary<string, object>();
             res["closed"] = title;
