@@ -3464,7 +3464,9 @@ namespace Axon
         // has its own checks.
         static readonly HashSet<string> BlockedOpenExt = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
             ".exe", ".com", ".bat", ".cmd", ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh",
-            ".msi", ".msp", ".scr", ".pif", ".lnk", ".url", ".reg", ".hta", ".cpl", ".jar", ".appx", ".msix", ".inf", ".scf" };
+            ".msi", ".msp", ".scr", ".pif", ".lnk", ".url", ".reg", ".hta", ".cpl", ".jar", ".appx", ".msix", ".inf", ".scf",
+            ".rdp", ".kdbx", ".py", ".pyw", ".msc", ".settingcontent-ms", ".xll", ".chm", ".pfx", ".p12", ".iso", ".img", ".vhd", ".vhdx",
+            ".application", ".gadget", ".ws", ".sct", ".diagcab", ".theme", ".deskthemepack", ".library-ms", ".search-ms", ".website", ".webloc", ".ps1xml", ".psd1", ".mst", ".msh" };
 
         // A document or folder in whatever the user's machine opens it with:
         // ShellExecute "open", the same thing a double-click in Explorer does.
@@ -3472,7 +3474,9 @@ namespace Axon
         {
             string path = Str(Get(a, "path"));
             if (string.IsNullOrEmpty(path)) throw new AxonError("bad_path", "open needs path.", null);
-            string full = Path.GetFullPath(path);
+            string full;
+            try { full = Path.GetFullPath(path); }
+            catch (Exception ex) { throw new AxonError("bad_path", "Not a usable path: " + ex.Message, null); }
             bool folder = Directory.Exists(full);
             if (!folder && !File.Exists(full))
                 throw new AxonError("not_found", "No file or folder at " + full + ".", "Check the path.");
@@ -3516,7 +3520,9 @@ namespace Axon
         {
             string path = Str(Get(a, "path"));
             if (string.IsNullOrEmpty(path)) throw new AxonError("bad_path", "file_dialog needs path.", null);
-            string full = Path.GetFullPath(path);
+            string full;
+            try { full = Path.GetFullPath(path); }
+            catch (Exception ex) { throw new AxonError("bad_path", "Not a usable path: " + ex.Message, null); }
             bool save = string.Equals(Str(Get(a, "action")), "save", StringComparison.OrdinalIgnoreCase);
             if (!save && !File.Exists(full) && !Directory.Exists(full))
                 throw new AxonError("not_found", "No file or folder at " + full + ".",
@@ -3539,32 +3545,55 @@ namespace Axon
             if (box == null)
                 throw new AxonError("no_filename_box", "The dialog has no File name box (automation id 1148), so it is not the Windows common dialog.",
                     "Snapshot it and drive it with click and type.");
+            // A value write that is accepted and then ignored is the common failure
+            // of this dialog, so every write is read back before it is believed.
             bool set = false;
+            string method = null;
             object vp;
-            if (box.TryGetCurrentPattern(ValuePattern.Pattern, out vp))
+            AutomationElement edit = box.FindFirst(TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit));
+            foreach (AutomationElement target in new AutomationElement[] { box, edit })
             {
-                try { ((ValuePattern)vp).SetValue(full); set = true; } catch { }
-            }
-            if (!set)
-            {
-                AutomationElement edit = box.FindFirst(TreeScope.Descendants,
-                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit));
-                if (edit != null && edit.TryGetCurrentPattern(ValuePattern.Pattern, out vp))
+                if (target == null || set) continue;
+                if (!target.TryGetCurrentPattern(ValuePattern.Pattern, out vp)) continue;
+                try
                 {
-                    try { ((ValuePattern)vp).SetValue(full); set = true; } catch { }
+                    ((ValuePattern)vp).SetValue(full);
+                    System.Threading.Thread.Sleep(40);
+                    string back = null;
+                    try { back = ((ValuePattern)target.GetCurrentPattern(ValuePattern.Pattern)).Current.Value; } catch { }
+                    if (back != null && string.Equals(back.Trim().Trim('"'), full, StringComparison.OrdinalIgnoreCase)) { set = true; method = target == box ? "value" : "value (edit)"; }
                 }
+                catch { }
             }
             if (!set)
             {
-                // Neither control took a value write: focus the box, select what
-                // is there and type the path the way a person would.
-                try { box.SetFocus(); } catch { }
-                System.Threading.Thread.Sleep(30);
+                // No control took a value write: focus the box, prove the focus
+                // moved, select what is there and type the path as a person would.
+                try { (edit ?? box).SetFocus(); } catch { }
+                System.Threading.Thread.Sleep(40);
+                bool focused = false;
+                try
+                {
+                    AutomationElement walk = AutomationElement.FocusedElement;
+                    for (int i = 0; walk != null && i < 6 && !focused; i++)
+                    {
+                        string aid = null;
+                        try { aid = walk.Current.AutomationId; } catch { }
+                        if (aid == "1148") focused = true;
+                        else walk = TreeWalker.ControlViewWalker.GetParent(walk);
+                    }
+                }
+                catch { }
+                if (!focused)
+                    throw new AxonError("focus_failed", "The File name box did not take the focus, so nothing was typed into it.",
+                        "Snapshot the dialog and click the File name box, then call again.");
                 Native.KeyDown(VkOf("ctrl"));
                 Native.KeyTap(VkOf("a"));
                 Native.KeyUp(VkOf("ctrl"));
                 Native.TypeUnicode(full);
                 set = true;
+                method = "typed";
             }
             System.Threading.Thread.Sleep(60);
             // Confirm with the dialog's own button so a relabelled "Upload" or
@@ -3593,7 +3622,35 @@ namespace Axon
             res["dialog"] = title;
             res["path"] = full;
             res["closed"] = closed;
-            res["method"] = invoked ? "button" : "enter";
+            res["method"] = (invoked ? "button" : "enter") + ", path by " + method;
+            if (!closed)
+            {
+                // A dialog that stayed open is usually asking something in a box
+                // of its own (Replace? Not found?). Its words are what the caller
+                // needs, not a guess.
+                try
+                {
+                    AutomationElementCollection boxes = AutomationElement.RootElement.FindAll(TreeScope.Children,
+                        new PropertyCondition(AutomationElement.ClassNameProperty, "#32770"));
+                    foreach (AutomationElement b in boxes)
+                    {
+                        IntPtr bh = IntPtr.Zero;
+                        try { bh = new IntPtr(b.Current.NativeWindowHandle); } catch { continue; }
+                        if (bh == IntPtr.Zero || bh == dlgHwnd || !Native.IsWindowVisible(bh)) continue;
+                        if (Native.GetWindowRel(bh, 4 /* GW_OWNER */) != dlgHwnd) continue;
+                        string asking = null;
+                        try { asking = b.Current.Name; } catch { }
+                        AutomationElement text = b.FindFirst(TreeScope.Descendants,
+                            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text));
+                        string body = null;
+                        try { if (text != null) body = text.Current.Name; } catch { }
+                        res["asking"] = (asking ?? "") + (body != null ? ": " + body : "");
+                        res["asking_hwnd"] = Hwnd(bh);
+                        break;
+                    }
+                }
+                catch { }
+            }
             return res;
         }
 

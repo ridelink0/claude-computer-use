@@ -1116,6 +1116,9 @@ const handlers = {
   async computer_open(args) {
     const target = String(args.path || '').trim();
     if (!target) return fail('bad_path', 'Pass path: a document or folder to open in its default app.', null);
+    if (/[\u0000-\u001f]/.test(target)) return fail('bad_path', 'The path contains control characters.', null);
+    const locked = await lockedCheck();
+    if (locked) return locked;
     const before = await windowSet();
     let r;
     try { ({ result: r } = await driver.call('open', { path: target })); }
@@ -1138,7 +1141,7 @@ const handlers = {
     if (!args.path) return fail('bad_path', 'Pass path: the full path to open, or the path to save as with action: "save".', null);
     return act('file_dialog', args, (r) => (r.closed ? `dialog accepted ${JSON.stringify(r.path)} via ${r.method}` : `dialog still open after ${JSON.stringify(r.path)} via ${r.method}`)
       + (r.dialog ? ` ("${r.dialog}")` : '') + '.'
-      + (r.closed ? '' : ' It may be asking something (overwrite? not found?) - snapshot it.'));
+      + (r.closed ? '' : r.asking ? ` It is asking: ${r.asking} (window ${r.asking_hwnd}) - answer it with computer_snapshot and computer_click.` : ' It may be asking something (overwrite? not found?) - snapshot it.'));
   },
 
   async computer_paste(args) {
@@ -1148,8 +1151,10 @@ const handlers = {
       let body;
       try {
         const st = fsx.statSync(String(files[0]));
+        if (st.isDirectory()) return fail('is_directory', `${files[0]} is a folder; as_text pastes one text file's contents.`, 'Pass it in files without as_text to paste it as a file drop.');
         if (st.size > 1000000) return fail('file_too_large', `${files[0]} is ${st.size} bytes; as_text pastes up to 1 MB of text.`, 'Paste it as a file instead: drop as_text.');
-        body = fsx.readFileSync(String(files[0]), 'utf8');
+        body = decodeText(fsx.readFileSync(String(files[0])));
+        if (body === null) return fail('not_text', `${files[0]} is not a text file (it holds NUL bytes past any byte-order mark).`, 'Drop as_text to paste it as a file.');
       } catch (err) { return fail('not_found', `Could not read ${files[0]}: ${err.message}`, null); }
       return act('paste', { ...args, text: body, file: undefined, files: undefined, as_text: undefined }, describePaste);
     }
@@ -1533,6 +1538,22 @@ const STEP_HANDLERS = {
   file_dialog: (a) => handlers.computer_file_dialog(a),
 };
 
+// A text file by its byte-order mark, so a UTF-16 document (Notepad's default
+// for years) pastes as its words and not as every other byte being NUL. No
+// mark and a NUL in the first 4 KB is a binary, and null says so.
+function decodeText(buf) {
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) return buf.subarray(2).toString('utf16le');
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) {
+    const swapped = Buffer.from(buf.subarray(2));
+    for (let i = 0; i + 1 < swapped.length; i += 2) { const t = swapped[i]; swapped[i] = swapped[i + 1]; swapped[i + 1] = t; }
+    return swapped.toString('utf16le');
+  }
+  if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) return buf.subarray(3).toString('utf8');
+  const head = buf.subarray(0, 4096);
+  for (let i = 0; i < head.length; i++) if (head[i] === 0) return null;
+  return buf.toString('utf8');
+}
+
 // Every input-sending tool funnels through one gate, so there is exactly one
 // place where "may Computer Use act on this window" is decided.
 // Ops that act on a specific control rather than on whatever has focus.
@@ -1766,7 +1787,7 @@ async function handleMessage(msg) {
   // never to offer it there than to offer a tool that cannot work - and the
   // schema it does not send is schema macOS does not pay for on every request.
   if (method === 'tools/list') {
-    const tools = process.platform === 'win32' ? TOOLS : TOOLS.filter((t) => t.name !== 'computer_paste');
+    const tools = process.platform === 'win32' ? TOOLS : TOOLS.filter((t) => !['computer_paste', 'computer_open', 'computer_file_dialog'].includes(t.name));
     reply(id, { tools });
     return;
   }
