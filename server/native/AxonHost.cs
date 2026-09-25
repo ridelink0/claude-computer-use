@@ -40,6 +40,7 @@ namespace Axon
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern int GetWindowTextW(IntPtr h, System.Text.StringBuilder text, int max);
         [DllImport("user32.dll")] internal static extern int GetWindowLongW(IntPtr h, int index);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern int GetClassName(IntPtr h, System.Text.StringBuilder cls, int max);
+        [DllImport("oleacc.dll")] internal static extern int AccessibleObjectFromWindow(IntPtr h, int objectId, ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object acc);
         [DllImport("user32.dll")] internal static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
         internal delegate bool EnumChildProc(IntPtr h, IntPtr lparam);
         [DllImport("user32.dll")] internal static extern IntPtr GetForegroundWindow();
@@ -2526,6 +2527,59 @@ namespace Axon
 
         static bool RunPattern(Action act) { return RunPattern(act, PatternDeadlineMs); }
 
+        // A Win32 push button or check box pressed through its MSAA default
+        // action instead of the UI Automation pattern. The client-side UIA
+        // proxy for the BUTTON class gives the button the keyboard focus before
+        // pressing it, and when Windows will not let this process take the
+        // foreground - which is every time the user is in another app - it sits
+        // out its focus timeouts first. Measured on the WinForms test target
+        // with the terminal in front: Invoke and Toggle 4.0-4.3 s each, this
+        // path 16-70 ms, the press landing either way. It is the same action a
+        // screen reader's "press" sends, it needs no focus, and it moves
+        // neither the cursor nor the foreground.
+        //
+        // Only for an element that is itself a BUTTON-class window and says it
+        // has a default action; anything else (a windowless control, a browser,
+        // WPF, a group box) returns false and takes the UIA path as before.
+        // Returns null when not taken, otherwise whether the call finished
+        // inside the pattern deadline.
+        static bool? MsaaPress(AutomationElement el)
+        {
+            int h = 0;
+            try { h = el.Current.NativeWindowHandle; } catch { return null; }
+            if (h == 0) return null;
+            IntPtr hw = new IntPtr(h);
+            System.Text.StringBuilder cls = new System.Text.StringBuilder(128);
+            Native.GetClassName(hw, cls, cls.Capacity);
+            string c = cls.ToString();
+            bool button = string.Equals(c, "Button", StringComparison.OrdinalIgnoreCase)
+                       || c.StartsWith("WindowsForms10.BUTTON", StringComparison.OrdinalIgnoreCase);
+            if (!button) return null;
+            object acc = null;
+            try
+            {
+                Guid iid = new Guid("618736E0-3C3D-11CF-810C-00AA00389B71"); // IID_IAccessible
+                if (Native.AccessibleObjectFromWindow(hw, unchecked((int)0xFFFFFFFC) /* OBJID_CLIENT */, ref iid, out acc) != 0 || acc == null)
+                    return null;
+                object action = acc.GetType().InvokeMember("accDefaultAction",
+                    System.Reflection.BindingFlags.GetProperty, null, acc, new object[] { 0 });
+                if (string.IsNullOrEmpty(action as string)) return null;
+            }
+            catch { return null; }
+            object a2 = acc;
+            try
+            {
+                return RunPattern(delegate
+                {
+                    a2.GetType().InvokeMember("accDoDefaultAction",
+                        System.Reflection.BindingFlags.InvokeMethod, null, a2, new object[] { 0 });
+                });
+            }
+            // A refused default action did nothing, so the UIA path still gets
+            // its turn rather than the click falling through to a real one.
+            catch { return null; }
+        }
+
         static bool RunPattern(Action act, int deadlineMs)
         {
             Exception failure = null;
@@ -2676,7 +2730,13 @@ namespace Axon
                         {
                             Trace(el, "click", HwndArg(a));
                             InvokePattern ip = p;
-                            if (!RunPattern(delegate { ip.Invoke(); })) res["slow_provider"] = true;
+                            bool? msaa = MsaaPress(el);
+                            if (msaa == null) { if (!RunPattern(delegate { ip.Invoke(); })) res["slow_provider"] = true; }
+                            else
+                            {
+                                res["via"] = "msaa_default_action";
+                                if (msaa == false) res["slow_provider"] = true;
+                            }
                             res["method"] = "invoke_pattern";
                             AddNowState(res, el);
                             return res;
@@ -2689,7 +2749,25 @@ namespace Axon
                         {
                             Trace(el, "toggle", HwndArg(a));
                             TogglePattern tp2 = p;
-                            bool done = RunPattern(delegate { tp2.Toggle(); });
+                            ToggleState was = ToggleState.Indeterminate;
+                            bool knewState = false;
+                            try { was = p.Current.ToggleState; knewState = true; } catch { }
+                            bool? msaa = MsaaPress(el);
+                            bool done;
+                            if (msaa == null) done = RunPattern(delegate { tp2.Toggle(); });
+                            else
+                            {
+                                done = msaa.Value;
+                                res["via"] = "msaa_default_action";
+                                // A native check box may take the press as a
+                                // posted click; give its state a moment to move
+                                // so the reported state is the new one.
+                                for (int i = 0; done && knewState && i < 10; i++)
+                                {
+                                    try { if (p.Current.ToggleState != was) break; } catch { break; }
+                                    System.Threading.Thread.Sleep(30);
+                                }
+                            }
                             res["method"] = "toggle_pattern";
                             // A provider that did not answer the toggle in time is
                             // not asked anything else on this thread.
