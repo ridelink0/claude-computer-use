@@ -1069,6 +1069,9 @@ const handlers = {
     }
 
     const before = await windowSet();
+    // Every window that existed before the launch, minimized and cloaked ones
+    // included: only one of these can be "the window it already had".
+    const existedBefore = new Set((await listWindows({ includeHidden: true, fresh: true })).map((w) => Number(w.hwnd)));
     try {
       let child;
       if (process.platform === 'darwin') {
@@ -1126,6 +1129,16 @@ const handlers = {
       if (Date.now() - started > 1200) {
         const fg = (await listWindows()).find((w) => w.foreground);
         if (fg && sameApp(fg) && (!fgBefore || Number(fgBefore.hwnd) !== Number(fg.hwnd))) {
+          // A window that did not exist before the launch is the launch, even
+          // when the new-window listing above left it out. On 2026-09-25 a cold
+          // Paint start on a loaded machine was reported as "already running
+          // ... in its existing window" three times with no Paint open at all
+          // (twice in batch-test, once alone). Which filter hid the new window
+          // that moment was not caught; the rule holds whatever it was.
+          if (!existedBefore.has(Number(fg.hwnd))) {
+            return text(`launched "${app}"${via} after ${Date.now() - started}ms: ${describeWindow(fg)}. ` +
+              'Read it with computer_snapshot; computer_grant before acting.');
+          }
           return text(`"${app}" was already running and opened in its existing window: ${describeWindow(fg)}. ` +
             'Read it with computer_snapshot; computer_grant before acting.');
         }
