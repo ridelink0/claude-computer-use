@@ -1328,7 +1328,12 @@ const handlers = {
         let delta = null;
         if (stableIndices()) {
           const d = diffRows(baseRows, built.rows);
-          moved = d.added.length > 0 || d.changed.length > 0 || d.removed.length > 0;
+          // A read cut short by its time budget did not reach part of the
+          // window, so a row it lacks is not a row that went away. Seen on a
+          // loaded machine: a 14.6 s read of the still test target came back
+          // without its Notes box, which read as a change.
+          const partial = !!cur.time_budget_ms;
+          moved = d.added.length > 0 || d.changed.length > 0 || (!partial && d.removed.length > 0);
           if (moved) delta = renderDelta(cur, baseRows, built, { since, ms: waited() });
         } else {
           // Without stable indices only the text can be compared, and the
@@ -1362,7 +1367,8 @@ const handlers = {
         if (hit && !args.gone) {
           return text(`found ${JSON.stringify(String(args.text))} after ${waited()}ms in [${hit.i}] ${hit.role}${hit.name ? ` "${hit.name}"` : ''}.`);
         }
-        if (!hit && args.gone) return text(`${JSON.stringify(String(args.text))} is gone after ${waited()}ms.`);
+        // Only a read that reached the whole window can say the text is gone.
+        if (!hit && args.gone && !cur.time_budget_ms) return text(`${JSON.stringify(String(args.text))} is gone after ${waited()}ms.`);
         await sleep(300);
       }
       return timedOut(args.gone ? `${JSON.stringify(String(args.text))} did not disappear` : `${JSON.stringify(String(args.text))} did not appear`);

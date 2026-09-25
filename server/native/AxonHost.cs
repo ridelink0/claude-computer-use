@@ -1506,25 +1506,40 @@ namespace Axon
                         // an editor - and only a bounded number of times.
                         string txt = null;
                         if (patterns.Contains("Value")) txt = CleanText(CachedProp(el, ValuePattern.ValueProperty) as string);
-                        if (txt == null && patterns.Contains("Text") && (role == "Document" || role == "Edit") && liveTextReads < 24
-                            && walkClock.ElapsedMilliseconds < walkBudgetMs / 2)
+                        // Text that was not read is not the same as no text. A
+                        // read that skips it (out of budget) or gives up on it
+                        // (the app was slow) says so, and the server does not
+                        // count its absence as the document having changed:
+                        // on a loaded machine the Notes box of the test target
+                        // flapped between "text" and "no text" from one read to
+                        // the next, and wait_for change reported a still
+                        // window as changed.
+                        bool textUnread = false;
+                        if (txt == null && patterns.Contains("Text") && (role == "Document" || role == "Edit"))
                         {
-                            liveTextReads++;
-                            // A live call into the app, so it runs with a deadline:
-                            // one wedged editor must not hold the whole read.
-                            string got = null;
-                            AutomationElement tel = el;
-                            try
+                            if (liveTextReads < 24 && walkClock.ElapsedMilliseconds < walkBudgetMs / 2)
                             {
-                                RunPattern(delegate
+                                liveTextReads++;
+                                // A live call into the app, so it runs with a deadline:
+                                // one wedged editor must not hold the whole read.
+                                string got = null;
+                                AutomationElement tel = el;
+                                bool answered = true;
+                                try
                                 {
-                                    TextPattern tp = tel.GetCurrentPattern(TextPattern.Pattern) as TextPattern;
-                                    if (tp != null) got = tp.DocumentRange.GetText(4000);
-                                }, 1500);
+                                    answered = RunPattern(delegate
+                                    {
+                                        TextPattern tp = tel.GetCurrentPattern(TextPattern.Pattern) as TextPattern;
+                                        if (tp != null) got = tp.DocumentRange.GetText(4000);
+                                    }, 1500);
+                                }
+                                catch { }
+                                if (answered) txt = CleanText(got);
+                                else textUnread = true;
                             }
-                            catch { }
-                            txt = CleanText(got);
+                            else textUnread = true;
                         }
+                        if (textUnread) node["text_unread"] = true;
                         if (txt != null)
                         {
                             txt = txt.Replace("\r\n", "\n");

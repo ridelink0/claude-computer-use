@@ -221,6 +221,10 @@ export function buildRows(snap, { textLimit = 200, withRects = false, chrome = f
     if (st.expand) flags.push(st.expand.toLowerCase());
     if (st.value !== undefined) flags.push(`value=${st.value}`);
     if (flags.length) line += ` {${flags.join(' ')}}`;
+    // The row without its text, for comparing against a read in which the
+    // text did not arrive (see diffRows).
+    const base = line;
+    if (n.text_unread && !txt) line += ' = (text not read: the app answered too slowly)';
 
     // Text that merely repeats the name is noise on every label; a link's
     // href goes inline, shortened when it stays on this site; the page URL
@@ -236,7 +240,10 @@ export function buildRows(snap, { textLimit = 200, withRects = false, chrome = f
         line += `\n${indent}      = ${preview(n.text, textLimit)}`;
       }
     }
-    rows.push({ i: Number(n.i), line, role: n.role, name });
+    const row = { i: Number(n.i), line, role: n.role, name };
+    if (n.text_unread && !txt) { row.base = base; row.unread = true; }
+    else if (txt && txt !== name) row.base = base;
+    rows.push(row);
   }
   return { rows, url, pruned, hiddenChrome, focus };
 }
@@ -391,11 +398,18 @@ function lineKey(line) {
 // What changed between two reads of the same window, row by row. Indices are
 // stable per window, so a row with the same index is the same control; a
 // different line for the same index is a control that changed.
+//
+// A row whose text the host could not read in time (unread) is compared
+// without its text on both sides: that the text did not arrive says nothing
+// about whether it changed.
 export function diffRows(prev, cur) {
-  const pm = new Map(prev.map((r) => [r.i, lineKey(r.line)]));
+  const pm = new Map(prev.map((r) => [r.i, r]));
   const cm = new Map(cur.map((r) => [r.i, r.line]));
+  const same = (a, b) => ((a.unread || b.unread)
+    ? lineKey(a.base || a.line) === lineKey(b.base || b.line)
+    : lineKey(a.line) === lineKey(b.line));
   const added = cur.filter((r) => !pm.has(r.i));
-  const changed = cur.filter((r) => pm.has(r.i) && pm.get(r.i) !== lineKey(r.line));
+  const changed = cur.filter((r) => pm.has(r.i) && !same(pm.get(r.i), r));
   const removed = prev.filter((r) => !cm.has(r.i));
   return { added, changed, removed, same: cur.length - added.length - changed.length };
 }
