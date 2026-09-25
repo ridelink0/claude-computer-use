@@ -5,7 +5,7 @@
 // That moves the screen out from under whoever is sitting there, so it is opt-in
 // and run on its own:
 //
-//   node tools/desktop-test.mjs
+//   CU_DESKTOP_TEST=1 node tools/desktop-test.mjs
 //
 // It proves the two things that matter when a Claude session and a person are
 // on different desktops:
@@ -34,15 +34,35 @@ const check = (n, c, d) => {
   else { fail++; failures.push(n); console.log(`  FAIL ${n}${d ? ' :: ' + d : ''}`); }
 };
 
+// The same ceiling as mcp-test.mjs, for the same reason: the PowerShell
+// WinForms target appears in about 3 s on an idle machine and took more than
+// 15 s on 2026-09-25 with the CPU at 100%, which failed this suite before it
+// had tested anything.
+const TARGET_TIMEOUT_MS = Number(process.env.COMPUTER_USE_TARGET_TIMEOUT_MS) || 60000;
+
 function spawnTarget() {
   return new Promise((resolve, reject) => {
     const p = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', TARGET],
       { stdio: ['ignore', 'pipe', 'pipe'] });
-    const t = setTimeout(() => reject(new Error('target never reported in')), 15000);
+    const t = setTimeout(() => reject(new Error(`target never reported in within ${TARGET_TIMEOUT_MS} ms (COMPUTER_USE_TARGET_TIMEOUT_MS raises it)`)), TARGET_TIMEOUT_MS);
     createInterface({ input: p.stdout }).on('line', (l) => {
       try { const i = JSON.parse(l.trim()); if (i.title) { clearTimeout(t); resolve({ proc: p, ...i }); } } catch {}
     });
   });
+}
+
+// Opt-in by an explicit switch, not by remembering not to run it. It sits
+// among the tools/*-test.mjs scripts, and "run every test script" is how it
+// got run by accident on 2026-09-25 while its owner was at the machine, which
+// is exactly the screen switch the plugin promises never to make. Without the
+// switch it says plainly that nothing was tested and exits 0: it did not fail,
+// and it did not pass either.
+if (process.env.CU_DESKTOP_TEST !== '1') {
+  console.log('\ndesktop-test: NOT RUN. It creates and switches to a second virtual desktop,');
+  console.log('which moves the screen out from under whoever is using this machine.');
+  console.log('Run it on a machine nobody is using, with CU_DESKTOP_TEST=1.');
+  console.log('\n0 passed, 0 failed (not run)');
+  process.exit(0);
 }
 
 const d = new Driver({ onLog: () => {} });

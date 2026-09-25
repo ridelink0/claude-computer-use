@@ -159,8 +159,9 @@ the operating system's decision, not something a plugin can route around. So:
   become invisible to it, and naming one by handle is refused. `all`, the
   default, lets it see them and say where they are.
 
-`node tools/desktop-test.mjs` proves this on your machine. It creates a second
-virtual desktop, checks all of the above, and closes it again.
+`CU_DESKTOP_TEST=1 node tools/desktop-test.mjs` proves this on your machine. It
+creates a second virtual desktop, switches to it, checks all of the above, and
+closes it again. Without `CU_DESKTOP_TEST=1` it runs nothing and says so.
 
 ## Before it sends, pays, or deletes
 
@@ -621,9 +622,10 @@ node tools/host-test.mjs        57  tree, patterns, input, crash recovery
 node tools/mcp-test.mjs         66  the protocol end to end, prints token costs
 node tools/batch-test.mjs       66  stable indices, deltas, find, waits, runs, tasks, posted input, launch
 
-and one that is deliberately not in that run, because it moves your screen:
+and one that is deliberately not in that run, because it moves your screen,
+and that runs nothing unless asked by name:
 
-node tools/desktop-test.mjs     11  a real second virtual desktop, created and closed
+CU_DESKTOP_TEST=1 node tools/desktop-test.mjs   11  a real second virtual desktop, created and closed
 ```
 
 They build their own throwaway window and never touch anything already open.
