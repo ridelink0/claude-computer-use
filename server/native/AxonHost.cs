@@ -2555,13 +2555,21 @@ namespace Axon
         //
         // Only for an element that is itself a BUTTON-class window and says it
         // has a default action; anything else (a windowless control, a browser,
-        // WPF, a group box) returns false and takes the UIA path as before.
+        // WPF, a group box, a disabled button) returns null and takes the UIA path
+        // as before.
         // Returns null when not taken, otherwise whether the call finished
         // inside the pattern deadline.
         static bool? MsaaPress(AutomationElement el)
         {
             int h = 0;
-            try { h = el.Current.NativeWindowHandle; } catch { return null; }
+            try
+            {
+                h = el.Current.NativeWindowHandle;
+                // A disabled button's default action does nothing and reports
+                // nothing; the UIA path refuses it out loud, so it keeps it.
+                if (!el.Current.IsEnabled) return null;
+            }
+            catch { return null; }
             if (h == 0) return null;
             IntPtr hw = new IntPtr(h);
             System.Text.StringBuilder cls = new System.Text.StringBuilder(128);
