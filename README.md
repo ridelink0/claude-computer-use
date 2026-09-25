@@ -1,6 +1,7 @@
 # Better Computer Use
 
 Codex-style computer use for Claude Code, on Windows and macOS — the accessibility-tree way, not screenshots.
+(The macOS host has never been compiled or run on a Mac: see [About the macOS host](#about-the-macos-host).)
 
 > Install id: `computer-use`.
 
@@ -620,7 +621,7 @@ node tools/presence-test.mjs    32  telling you apart from Computer Use, overlay
 node tools/build-test.mjs       15  compile, idempotence, concurrent builds, manifest and marketplace versions agree
 node tools/host-test.mjs        57  tree, patterns, input, crash recovery
 node tools/mcp-test.mjs         66  the protocol end to end, prints token costs
-node tools/batch-test.mjs       66  stable indices, deltas, find, waits, runs, tasks, posted input, launch
+node tools/batch-test.mjs       69  stable indices, deltas, find, waits, runs, tasks, posted input, launch
 
 and one that is deliberately not in that run, because it moves your screen,
 and that runs nothing unless asked by name:
