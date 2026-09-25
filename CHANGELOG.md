@@ -4,6 +4,46 @@ Every released version, newest first, on the tag of the same name. Dates are the
 release commit's own. Anything marked UNVERIFIED was not exercised on real
 hardware at the time it shipped.
 
+## 0.9.6 - 2026-09-25
+
+Found by reproducing the batch-test suite on a loaded machine (CPU pinned at
+100%), where it had been passing 67/68 or dying outright:
+
+- Win32 BUTTON-class controls (plain buttons and check boxes) are pressed
+  through the MSAA default action (`AccessibleObjectFromWindow` +
+  `accDoDefaultAction`) instead of the UI Automation proxy, which tries to
+  give the control keyboard focus first and waits out its focus timeout when
+  Windows refuses the host the foreground. Clicks dropped from 4.1 s to
+  15-67 ms and toggles from 4.1 s to 49-170 ms; the press lands on the very
+  next read every time. Disabled buttons and every other control keep the
+  UIA path. Reported as `msaa_default_action` when this path is used.
+- batch, host, presence and verify now wait 60 s for their target window
+  before giving up, matching mcp-test, and `COMPUTER_USE_TARGET_TIMEOUT_MS`
+  raises it further; batch-test's new_window wait uses the same ceiling. The
+  old 15 s ceiling died under load.
+- `computer_launch` no longer calls a cold start "already running and opened
+  in its existing window" - a window only counts as the existing one if it
+  was in the pre-launch window listing (hidden and cloaked included).
+- `wait_for change` no longer reports a still window as changed under load.
+  A TextPattern read that times out now marks the row `text_unread` instead
+  of blank, and rows compare without their text; a read cut short before its
+  time budget no longer counts its missing rows as removed, so
+  `wait_for change` ignores them and `wait_for text gone:true` no longer
+  answers "gone" from one.
+- `desktop-test` creates and switches to a second virtual desktop, which
+  breaks the rule against desktop switches; it now runs only under
+  `CU_DESKTOP_TEST=1` and otherwise prints NOT RUN and exits 0. Documented in
+  the README.
+- README: the macOS host has never been compiled or run on a Mac, called out
+  in the first lines with a link to the detail section; batch-test's count
+  corrected to 69.
+- Investigated and reverted: an event-driven `wait_for` (StructureChanged,
+  PropertyChanged, TextChanged and focus handlers on the host) measured
+  worse than the polling it would have replaced - handler registration alone
+  took 5.7-7.0 s under load, and once registered, events still arrived
+  120-2850 ms after the change against polling's ~0.5 s median. Kept as a
+  patch, not shipped: `event-driven-waits-experiment.patch`.
+
 ## 0.9.5 - 2026-09-21
 
 - A Stop hook reads the reply about to be handed back and, when it lists a job
