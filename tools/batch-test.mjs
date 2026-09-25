@@ -44,15 +44,21 @@ class Client {
     });
   }
   notify(method, params) { this.proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n'); }
-  call(name, args = {}) { return this.rpc('tools/call', { name, arguments: args }); }
+  call(name, args = {}, ms) { return this.rpc('tools/call', { name, arguments: args }, ms); }
   stop() { try { this.proc.kill(); } catch {} }
 }
+
+// The same ceiling as mcp-test.mjs, for the same reason: the PowerShell
+// WinForms target appears in about 3 s on an idle machine and took more than
+// 15 s on 2026-09-25 with the CPU at 100%, which failed this suite before it
+// had tested anything.
+const TARGET_TIMEOUT_MS = Number(process.env.COMPUTER_USE_TARGET_TIMEOUT_MS) || 60000;
 
 function spawnTarget(extra = []) {
   return new Promise((resolve, reject) => {
     const p = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', TARGET, ...extra],
       { stdio: ['ignore', 'pipe', 'pipe'] });
-    const t = setTimeout(() => reject(new Error('target never reported in')), 15000);
+    const t = setTimeout(() => reject(new Error(`target never reported in within ${TARGET_TIMEOUT_MS} ms (COMPUTER_USE_TARGET_TIMEOUT_MS raises it)`)), TARGET_TIMEOUT_MS);
     createInterface({ input: p.stdout }).on('line', (l) => {
       try { const i = JSON.parse(l.trim()); if (i.title) { clearTimeout(t); resolve({ proc: p, ...i }); } } catch {}
     });
@@ -186,7 +192,8 @@ async function main() {
   check('task lists its step lines', /2 click \[\d+\]: clicked via/.test(tk), tk);
 
   console.log('\n-- new window --');
-  const waiter = c.call('computer_wait_for', { hwnd, new_window: true, timeout_ms: 15000 });
+  // As long as the target itself may take to appear on a busy machine.
+  const waiter = c.call('computer_wait_for', { hwnd, new_window: true, timeout_ms: TARGET_TIMEOUT_MS }, TARGET_TIMEOUT_MS + 15000);
   await sleep(400);
   // Parked top-centre so it is in front of the first target without covering
   // that target's buttons: a posted click on a covered spot is dropped by

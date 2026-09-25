@@ -18,13 +18,19 @@ function check(name, cond, detail) {
   else { fail++; failures.push(name); console.log(`  FAIL ${name}${detail ? ' :: ' + detail : ''}`); }
 }
 
+// The same ceiling as mcp-test.mjs, for the same reason: the PowerShell
+// WinForms target appears in about 3 s on an idle machine and took more than
+// 15 s on 2026-09-25 with the CPU at 100%, which failed this suite before it
+// had tested anything.
+const TARGET_TIMEOUT_MS = Number(process.env.COMPUTER_USE_TARGET_TIMEOUT_MS) || 60000;
+
 function spawnTarget() {
   return new Promise((resolve, reject) => {
     const p = spawn('powershell.exe',
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', TARGET],
       { stdio: ['ignore', 'pipe', 'pipe'] });
     const rl = createInterface({ input: p.stdout });
-    const t = setTimeout(() => reject(new Error('target app did not report in')), 15000);
+    const t = setTimeout(() => reject(new Error(`target never reported in within ${TARGET_TIMEOUT_MS} ms (COMPUTER_USE_TARGET_TIMEOUT_MS raises it)`)), TARGET_TIMEOUT_MS);
     rl.on('line', (line) => {
       try {
         const info = JSON.parse(line.trim());
