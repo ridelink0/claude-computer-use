@@ -5,6 +5,18 @@ Codex-style computer use for Claude Code, on Windows and macOS — the accessibi
 
 > Install id: `computer-use`.
 
+It reads the accessibility tree, the structured data a screen reader uses, so it
+clicks controls by name instead of guessing coordinates from a screenshot. It
+can tell your input from its own, so you can keep working while it works.
+
+```
+/plugin marketplace add ridelink0/claude-computer-use
+/plugin install computer-use@computer-use
+```
+
+Windows or macOS, and Node 18+. Read the warning below before you run the
+second line. More in [Install](#install).
+
 ---
 
 ## Read this before you install it
