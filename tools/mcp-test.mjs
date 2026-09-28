@@ -274,8 +274,22 @@ async function main() {
   }
 
   console.log('\n-- blocked tiers --');
-  const allApps = body(await c.call('computer_apps', { include_hidden: true }));
-  const shellLine = allApps.split('\n').find((l) => /\bshell\b/.test(l));
+  // A terminal window of the test's own. The one running this suite is this
+  // session's own window and is (rightly) left out of every listing, and any
+  // other terminal on the desktop belongs to someone else and can close
+  // between the listing and the read - which is how this check once failed.
+  const shellTitle = `Computer Use Shell Test ${process.pid}`;
+  try {
+    spawn('wt.exe', ['-w', 'new', '--title', shellTitle, '--suppressApplicationTitle', 'cmd', '/k', 'echo shell-test'], { detached: true, stdio: 'ignore' })
+      .on('error', () => {}).unref();
+  } catch { /* no Windows Terminal: falls back to any shell window */ }
+  let shellLine = null;
+  for (let k = 0; k < 20 && !shellLine; k++) {
+    await new Promise((r) => setTimeout(r, 500));
+    shellLine = body(await c.call('computer_apps')).split('\n').find((l) => l.includes(shellTitle));
+  }
+  const ownShell = !!shellLine;
+  if (!shellLine) shellLine = body(await c.call('computer_apps')).split('\n').find((l) => /\bshell\b/.test(l));
   if (shellLine) {
     const shellHwnd = Number(shellLine.trim().split(/\s+/)[0]);
     const g = await c.call('computer_grant', { hwnd: shellHwnd });
@@ -283,6 +297,14 @@ async function main() {
     const r = await c.call('computer_snapshot', { hwnd: shellHwnd });
     check('shell-tier app is still readable', !r.isError);
     check('shell read carries an untrusted-content warning', body(r).includes('untrusted'), body(r).slice(0, 160));
+    if (ownShell) {
+      // Closed through the host directly: the tool refuses a terminal any
+      // input, close included, which is the rule working.
+      const { Driver } = await import('../server/driver.mjs');
+      const d = new Driver({ onLog: () => {} });
+      try { await d.start(); await d.call('close_window', { hwnd: shellHwnd, mode: 'take' }); } catch { /* best effort */ }
+      await d.stop();
+    }
   } else {
     console.log('     (no shell-tier window visible; skipped)');
   }
@@ -323,6 +345,7 @@ async function main() {
   console.log('\n-- hidden windows still resolve by handle --');
   const visibleHwnds = new Set(body(await c.call('computer_apps')).split('\n')
     .map((l) => Number(l.trim().split(/\s+/)[0])).filter(Number.isFinite));
+  const allApps = body(await c.call('computer_apps', { include_hidden: true }));
   const hiddenOnly = allApps.split('\n')
     .map((l) => Number(l.trim().split(/\s+/)[0]))
     .filter((h) => Number.isFinite(h) && h > 0 && !visibleHwnds.has(h));

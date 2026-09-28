@@ -89,10 +89,14 @@ async function main() {
 
   console.log('\n-- target --');
   const profile = path.join(os.tmpdir(), 'cu-web-test-profile');
-  spawn(EDGE, [`--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--inprivate', PAGE],
+  const launch = () => spawn(EDGE, [`--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--inprivate', PAGE],
     { detached: true, stdio: 'ignore' }).unref();
+  launch();
   let hwnd = 0;
   for (let i = 0; i < 120 && !hwnd; i++) {
+    // Once in a full run the window never came: the launch went to an Edge
+    // of that profile that was still shutting down. Asked once more.
+    if (i === 40) launch();
     await sleep(500);
     const line = body(await c.call('computer_apps')).split('\n').find((l) => l.includes('Computer Use Web Target'));
     if (line) hwnd = Number(line.trim().split(/\s+/)[0]);
