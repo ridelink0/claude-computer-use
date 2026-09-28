@@ -89,7 +89,12 @@ async function main() {
 
   console.log('\n-- target --');
   const profile = path.join(os.tmpdir(), 'cu-web-test-profile');
-  const launch = () => spawn(EDGE, [`--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--inprivate', PAGE],
+  // Edge pauses the timers and the accessibility updates of a page whose
+  // window is covered - measured: with the window opened behind a maximized
+  // terminal, every setTimeout on the page stalled and half this suite failed.
+  // These switches keep a covered test page running.
+  const launch = () => spawn(EDGE, [`--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--inprivate',
+    '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--disable-features=CalculateNativeWinOcclusion', PAGE],
     { detached: true, stdio: 'ignore' }).unref();
   launch();
   let hwnd = 0;
@@ -104,7 +109,15 @@ async function main() {
   check('the web target opened', hwnd > 0);
   if (!hwnd) { c.stop(); await probe.stop(); process.exit(1); }
   await c.call('computer_grant', { hwnd });
-  await sleep(800);
+  // Until the page itself is in the tree, not just the browser's frame.
+  for (let i = 0; i < 20; i++) {
+    const ready = body(await c.call('computer_snapshot', { hwnd, find: 'I agree to the terms' }));
+    if (/CheckBox "I agree to the terms"/.test(ready)) break;
+    await sleep(500);
+  }
+  // A page that has just appeared in the tree can still drop the first
+  // pattern call made on it (seen once on the check box below).
+  await sleep(700);
 
   console.log('\n-- own terminal (issue 11) --');
   const self = await new Promise((resolve) => {

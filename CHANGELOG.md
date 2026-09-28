@@ -68,6 +68,10 @@ tested, plus one opt-in grant.
   process owns no window; Windows Terminal draws it, so the old pid rule never
   matched. The host, run once as a helper, attaches to the session's console
   and takes the root owner of the console window, which is the terminal window.
+- **A terminal read shows its screen.** Windows Terminal's text area read as
+  its tab title and nothing else; its screen text (TextPattern visible ranges
+  of the TermControl, trailing padding and blank rows dropped) now comes back
+  as that element's text, so the reply to a command can be read.
 - **Opt-in: slash commands into another Claude Code terminal.** Off unless the
   new setting `allow_claude_slash_commands` is on. Then a terminal titled
   "Claude Code" can be granted slash commands only: one `/command` line, then

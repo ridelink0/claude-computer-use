@@ -298,6 +298,10 @@ async function main() {
     check('shell-tier app is still readable', !r.isError);
     check('shell read carries an untrusted-content warning', body(r).includes('untrusted'), body(r).slice(0, 160));
     if (ownShell) {
+      // What the terminal shows, not just its tab title: the screen text of
+      // Windows Terminal's text area (TermControl).
+      const screen = body(await c.call('computer_snapshot', { hwnd: shellHwnd, find: 'shell-test', text_limit: 4000 }));
+      check('a terminal read carries the text on its screen', /= ".*shell-test/.test(screen), screen.slice(0, 400));
       // Closed through the host directly: the tool refuses a terminal any
       // input, close included, which is the rule working.
       const { Driver } = await import('../server/driver.mjs');

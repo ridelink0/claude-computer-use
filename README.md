@@ -663,7 +663,7 @@ node tools/sessions-test.mjs    48  two Claudes: slots, the input lease, dead se
 node tools/presence-test.mjs    32  telling you apart from Computer Use, overlay, banner
 node tools/build-test.mjs       15  compile, idempotence, concurrent builds, manifest and marketplace versions agree
 node tools/host-test.mjs        57  tree, patterns, input, crash recovery
-node tools/mcp-test.mjs         66  the protocol end to end, prints token costs
+node tools/mcp-test.mjs         67  the protocol end to end, prints token costs
 node tools/batch-test.mjs       69  stable indices, deltas, find, waits, runs, tasks, posted input, launch
 node tools/fixes-test.mjs       21  names, landmarks, exclude, find on the printed row, max_nodes, run fields, resumed grants
 node tools/web-test.mjs         31  a web form in an InPrivate Edge window: click states, disabled and re-rendered

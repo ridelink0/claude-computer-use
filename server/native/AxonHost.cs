@@ -1234,6 +1234,28 @@ namespace Axon
 
         static CacheRequest _snapReq;
 
+        // A terminal screen as text: every row is padded to the width of the
+        // window, and most of the screen can be blank. Rows lose their trailing
+        // spaces, runs of blank rows become one, and blank rows at either end go.
+        static string ScreenLines(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return null;
+            string[] rows = raw.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+            StringBuilder sb = new StringBuilder();
+            bool blank = false;
+            foreach (string row in rows)
+            {
+                string r = row.TrimEnd();
+                if (r.Length == 0) { blank = sb.Length > 0; continue; }
+                if (blank) sb.Append('\n');
+                if (sb.Length > 0) sb.Append('\n');
+                sb.Append(r);
+                blank = false;
+            }
+            string t = CleanText(sb.ToString());
+            return t;
+        }
+
         static readonly string[] Landmarks = new string[]
         { "main", "navigation", "complementary", "banner", "contentinfo", "content information", "region", "search", "form" };
 
@@ -1272,6 +1294,8 @@ namespace Axon
             // Chromium names a page landmark (main, navigation, ...) here, and
             // an unnamed landmark would otherwise be an invisible wrapper.
             cr.Add(AutomationElement.LocalizedControlTypeProperty);
+            // Windows Terminal's text area is a Text element of class TermControl.
+            cr.Add(AutomationElement.ClassNameProperty);
             _snapReq = cr;
             return cr;
         }
@@ -1582,11 +1606,49 @@ namespace Axon
                             }
                             else textUnread = true;
                         }
+                        // A terminal's text area: what is on its screen. Its whole
+                        // document is the scrollback from the top, whose first
+                        // 4000 characters are the oldest output; the screen is
+                        // what the session is showing now - a prompt, a reply,
+                        // an offer to accept. Without this a terminal read as its
+                        // tab title and nothing else.
+                        bool screenText = false;
+                        if (txt == null && !textUnread && role == "Text" && patterns.Contains("Text")
+                            && (CachedProp(el, AutomationElement.ClassNameProperty) as string) == "TermControl")
+                        {
+                            if (liveTextReads < 24 && walkClock.ElapsedMilliseconds < walkBudgetMs / 2)
+                            {
+                                liveTextReads++;
+                                string got = null;
+                                AutomationElement tel = el;
+                                bool answered = true;
+                                try
+                                {
+                                    answered = RunPattern(delegate
+                                    {
+                                        TextPattern tp = tel.GetCurrentPattern(TextPattern.Pattern) as TextPattern;
+                                        if (tp == null) return;
+                                        StringBuilder sb = new StringBuilder();
+                                        foreach (System.Windows.Automation.Text.TextPatternRange r in tp.GetVisibleRanges())
+                                        {
+                                            sb.Append(r.GetText(20000));
+                                            if (sb.Length >= 20000) break;
+                                        }
+                                        got = sb.ToString();
+                                    }, 1500);
+                                }
+                                catch { }
+                                if (answered) { txt = ScreenLines(got); screenText = true; }
+                                else textUnread = true;
+                            }
+                            else textUnread = true;
+                        }
                         if (textUnread) node["text_unread"] = true;
                         if (txt != null)
                         {
                             txt = txt.Replace("\r\n", "\n");
-                            if (txt.Length > 4000) txt = txt.Substring(0, 4000) + "...[truncated]";
+                            if (txt.Length > 4000)
+                                txt = screenText ? "[...]" + txt.Substring(txt.Length - 4000) : txt.Substring(0, 4000) + "...[truncated]";
                             node["text"] = txt;
                         }
 
