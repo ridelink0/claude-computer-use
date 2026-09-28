@@ -609,9 +609,21 @@ try {
     // paying it in a bad parallel-call retry instead. Nothing here was folded
     // or cut first because there is nothing to fold: each boolean is its own
     // fact about a different handler, not wording. Slack is 30 tokens.
+    //
+    // Sixth move, 3970 to 4030, for computer_grant's preapprove and user_words
+    // (57 tokens; 3940 before them, 3997 after). They are the third
+    // confirmation tier, Codex's "pre-approval works": without them a user who
+    // says "send all twenty replies" is asked twenty times, and the only
+    // answer the model had was confirmed:true, which is its own say-so. With
+    // them, the pre-approval names the control, carries the user's own words,
+    // and the server refuses it when those words were read off the screen -
+    // the one part of the trust rule a server can check. A separate tool was
+    // not an option (a whole tool costs more than both arguments), and folding
+    // them into confirmed would make a per-click boolean mean two things. Both
+    // descriptions were cut first, 68 tokens measured, 57 after. Slack is 33.
     const tok = Math.round(chars / 4);
-    assert.ok(tok <= 3970, `schema ~${tok} tokens - over the always-on ceiling. Trim a description or argue the raise in the comment above; do not just move the number.`);
-    console.log(`       schema ~${tok} tokens (ceiling 3970)`);
+    assert.ok(tok <= 4030, `schema ~${tok} tokens - over the always-on ceiling. Trim a description or argue the raise in the comment above; do not just move the number.`);
+    console.log(`       schema ~${tok} tokens (ceiling 4030)`);
     const task = list.result.tools.find((t) => t.name === 'computer_task');
     assert.ok(task.inputSchema.properties.steps);
   });

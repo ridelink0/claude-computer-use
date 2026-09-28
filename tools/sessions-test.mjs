@@ -220,6 +220,52 @@ check('status names this session', desc.includes('session 2'), desc);
 check('status names the other one', desc.includes('session 1'), desc);
 check('status says grants are not shared', desc.includes('never shared'), desc);
 
+console.log('\n-- pre-approvals: until the session ends, never on disk --');
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-preapprove-'));
+  const clockWas = clock;
+  const mkp = (pid, sessionId) => new Sessions({ dir, pid, now: () => clock, isAlive: (x) => LIVE.has(Number(x)), sessionId });
+  const s = mkp(1001, 'conv-A');
+  s.register();
+  const e = s.preApprove('outlook', 'send', { source: 'user_typed' });
+  check('a pre-approval is kept for the session', s.preApproved('outlook', 'send') === e);
+  check('it names the conversation it was given in', e.session_id === 'conv-A', e.session_id);
+  check('it covers that control only', s.preApproved('outlook', 'reply all') === null);
+  check('and that app only', s.preApproved('thunderbird', 'send') === null);
+  clock += 6 * 3600_000;
+  s.heartbeat({ last_op: 'click' });
+  check('it still holds hours later, while the session lives', !!s.preApproved('outlook', 'send'));
+  const onDisk = fs.readdirSync(dir).map((f) => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n');
+  check('it is never written to the registration file', !/outlook|preappro|user_typed/i.test(onDisk), onDisk);
+  check('listed for status', s.listPreApprovals().length === 1);
+
+  s.preApprove('slack', 'post', { source: 'user_typed' });
+  check('revoking one app ends only that app\'s', s.endPreApprovals('slack') === 1 && !!s.preApproved('outlook', 'send'));
+
+  s.setSessionId('conv-A');
+  check('the same conversation id keeps them', !!s.preApproved('outlook', 'send'));
+  s.setSessionId('conv-B');
+  check('another conversation\'s id ends them', s.preApproved('outlook', 'send') === null);
+
+  const late = mkp(1002, null);
+  late.register();
+  late.preApprove('outlook', 'send', { source: 'user_typed' });
+  late.setSessionId('conv-C');
+  check('a server that learns its own id late keeps them', !!late.preApproved('outlook', 'send'));
+  late.close();
+  check('closing the session ends them', late.preApproved('outlook', 'send') === null && late.listPreApprovals().length === 0);
+
+  s.preApprove('outlook', 'send', { source: 'user_typed' });
+  const resumed = mkp(1002, 'conv-B');
+  resumed.register();
+  check('a resumed conversation (same id, new process) starts with none', resumed.preApproved('outlook', 'send') === null);
+  check('while the old process still has its own', !!s.preApproved('outlook', 'send'));
+  resumed.close();
+  s.close();
+  clock = clockWas;
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+}
+
 console.log('\n-- leaving --');
 b.close();
 check('closing deregisters', !fs.existsSync(path.join(root, '1002.json')));

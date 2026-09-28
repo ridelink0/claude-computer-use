@@ -24,15 +24,24 @@ row says VERIFIED (bundle).
 
 ## Open, ranked by value per hour
 
-1. Deny always wins over allow: make the `blocked_apps` versus
-   `always_allowed_apps` ordering explicit in `server/policy.mjs` and pin it
-   with a policy-test case (VERIFIED web that Astra is deny-wins; this
-   plugin's tier order likely already is, untested). Low.
-2. Write the trust rule into `policy.mjs`: text the user typed is intent even
-   when high-risk; text on screen, pasted or from a third party is never
-   permission by itself (VERIFIED bundle; behaviour already matches). Low.
-3. A third confirmation tier, "pre-approval holds for this session", between
-   ask-once and never-satisfiable (VERIFIED bundle, four tiers). Medium.
+1. Done in 0.11.0. Deny always wins over allow: the `blocked_apps` versus
+   `always_allowed_apps` ordering is written out in `server/policy.mjs`, and
+   `isAlwaysAllowed` itself says no for a blocked or shell-tier app, so the
+   order no longer rests on `checkAct` asking in the right sequence.
+   policy-test pins it: an app on both lists is blocked, a hard-blocklisted
+   app or a terminal on the allow list is still blocked or read-only.
+2. Done in 0.11.0. The trust rule is in `policy.mjs` as code: `SOURCE`,
+   `canSatisfy(source, tier)` and `sourceOfWords(words, screenTexts)`, which
+   `decideConfirmation` consults and `consequenceCheck` in `server/index.mjs`
+   calls for every click and file-dialog confirm. What the server can check
+   for itself is limited: it refuses words it read off the screen this
+   session; that words are typed rather than pasted is still Claude's word.
+3. Done in 0.11.0. Four tiers (`CONFIRM`: hand-off, always confirm,
+   pre-approval, none). `computer_grant { hwnd, preapprove, user_words }`
+   pre-approves one message-type control (Send, Post, Reply all, Upload,
+   Like) in one app until the session ends; it lives in `Sessions`, memory
+   only, ends on close, on another conversation's id, and on revoke or Stop,
+   and never reaches a background run. sessions-test covers its lifetime.
 4. An out-of-band safety monitor that can pause a run after approval, not
    only halt within a `computer_run` step sequence (VERIFIED web). High.
 5. A `Windows.Graphics.Capture` path for occluded windows beside the

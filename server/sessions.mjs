@@ -102,6 +102,13 @@ export class Sessions {
     // own actions racing is the same hazard as two sessions racing.
     this._chain = Promise.resolve();
     this._held = 0;
+    // Consequential controls the user has pre-approved for the rest of this
+    // session, in words they typed: "app\ncontrol" -> record. Memory only and
+    // never written anywhere - not into this session's registration file, not
+    // into the grants file a resumed conversation restores - so a new process
+    // starts with none and a resumed conversation asks again. They end when
+    // the session does: close(), a different conversation's id, or a revoke.
+    this.preApprovals = new Map();
   }
 
   register(extra = {}) {
@@ -149,6 +156,9 @@ export class Sessions {
   // The Stop hook names the session; a server started without the id learns it.
   setSessionId(id) {
     if (!id || id === this.sessionId) return;
+    // A server that learns its id late keeps what it was given before; one
+    // told it now belongs to another conversation keeps nothing from this one.
+    if (this.sessionId) this.endPreApprovals();
     this.sessionId = String(id);
     if (this.me) { this.me.session_id = this.sessionId; writeJson(this.file, this.me); }
   }
@@ -342,7 +352,33 @@ export class Sessions {
     return lines.join('\n');
   }
 
+  // Pre-approval for one consequential control in one app (both already
+  // normalised by Policy.preApproval), until the session ends.
+  preApprove(app, control, rec = {}) {
+    const entry = { ...rec, app: String(app), control: String(control), at: this.now(), session_id: this.sessionId };
+    this.preApprovals.set(`${entry.app}\n${entry.control}`, entry);
+    return entry;
+  }
+
+  preApproved(app, control) {
+    return this.preApprovals.get(`${app}\n${control}`) || null;
+  }
+
+  listPreApprovals() {
+    return [...this.preApprovals.values()];
+  }
+
+  // Ends every pre-approval, or only one app's. Returns how many ended.
+  endPreApprovals(app = null) {
+    let n = 0;
+    for (const [k, v] of this.preApprovals) {
+      if (app == null || v.app === app) { this.preApprovals.delete(k); n++; }
+    }
+    return n;
+  }
+
   close() {
+    this.endPreApprovals();
     this._release();
     try { fs.unlinkSync(this.file); } catch {}
   }
