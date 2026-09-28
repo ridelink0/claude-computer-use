@@ -4,6 +4,32 @@ Every released version, newest first, on the tag of the same name. Dates are the
 release commit's own. Anything marked UNVERIFIED was not exercised on real
 hardware at the time it shipped.
 
+## 0.10.1 - 2026-09-28
+
+Found by using 0.10.0 for a real job the same night - uploading two
+repositories' social preview images on github.com in Opera:
+
+- **A browser's Open dialog is found.** Opera shows its file picker from
+  another process than the window that owns it, and the desktop walk the host
+  used does not return such a dialog, so `computer_file_dialog` answered "no
+  Open or Save dialog is showing" with the picker in front. It now also looks
+  in the system's own window list for a dialog owned by that window, and
+  `computer_apps` lists owned dialogs the walk leaves out. Verified on the live
+  GitHub upload: the picker was listed as `Open` and filled, and both uploaded
+  images came back byte-identical to the files chosen. (Microsoft Edge did not
+  open a picker from an accessibility click on a local test page, so there is
+  no automated check of this path.)
+- **A drop shadow is not a window.** The wait for that picker reported a
+  tooltip's `SysShadow` window as the new window; that class is now left out
+  of listings with the rest of the shell's furniture.
+- **The host gets 45 s to start, not 20.** With the CPU near 85%, a host that
+  is normally ready in under a second took more than 20 s about one start in
+  five, and each of those failed its first call. The terminal-window lookup
+  gets 15 s for the same reason.
+- web-test closes a leftover Edge instance of its own profile before it
+  starts, and parks its stand-in for the user's window at the screen's right
+  edge.
+
 ## 0.10.0 - 2026-09-28
 
 Sixteen problems found on 2026-09-26 while filling in a web form in a

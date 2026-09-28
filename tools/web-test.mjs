@@ -89,6 +89,20 @@ async function main() {
 
   console.log('\n-- target --');
   const profile = path.join(os.tmpdir(), 'cu-web-test-profile');
+  // A run that died before its cleanup leaves its Edge running on this
+  // profile, and the next launch is handed to that instance (it opened a
+  // blank "Untitled" window). Its windows are this suite's own: closed first.
+  try {
+    const { execFileSync } = await import('node:child_process');
+    const q = `Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object { $_.CommandLine -like '*cu-web-test-profile*' } | ForEach-Object { $_.ProcessId }`;
+    const pids = new Set(String(execFileSync('powershell.exe', ['-NoProfile', '-Command', q], { windowsHide: true })).split(/\s+/).filter(Boolean).map(Number));
+    if (pids.size) {
+      for (const w of (await probe.call('list_apps', { include_hidden: true })).result.windows) {
+        if (pids.has(Number(w.pid))) { try { await probe.call('close_window', { hwnd: w.hwnd, mode: 'take' }); } catch { /* gone */ } }
+      }
+      await sleep(1500);
+    }
+  } catch { /* nothing left over */ }
   // Edge pauses the timers and the accessibility updates of a page whose
   // window is covered - measured: with the window opened behind a maximized
   // terminal, every setTimeout on the page stalled and half this suite failed.
@@ -185,7 +199,7 @@ async function main() {
   await sleep(300);
   const val = body(await c.call('computer_click', { hwnd, index: iVal }));
   check('a stale index is re-found by its name and role', !/element_stale/.test(val) && val.includes('had gone stale'), val);
-  const log1 = body(await c.call('computer_wait_for', { hwnd, text: 'validated web-test', timeout_ms: 4000 }));
+  const log1 = body(await c.call('computer_wait_for', { hwnd, text: 'validated web-test', timeout_ms: 8000 }));
   check('the new Validate button was the one pressed', log1.includes('found'), log1);
 
   console.log('\n-- scrolling needs no pointer (issue 7) --');

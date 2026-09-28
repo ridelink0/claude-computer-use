@@ -74,11 +74,14 @@ export class Driver {
       proc.on('exit', (code, signal) => fail(new HostError('host_exited',
         'Host process exited (code=' + code + ' signal=' + signal + ').',
         'The next call will start a fresh host.')));
+      // 45 s, not 20: on 2026-09-28, with the CPU near 85%, a host that is
+      // normally ready in under a second took more than 20 s about one start
+      // in five, and every one of those failed its first call.
       bootTimer = setTimeout(() => {
-        fail(new HostError('host_timeout', 'Host did not report ready within 20s.',
+        fail(new HostError('host_timeout', 'Host did not report ready within 45s.',
           this.stderr.join('').slice(-500) || 'Try a forced rebuild: node server/build.mjs --force'));
         try { proc.kill(); } catch {}
-      }, 20000);
+      }, 45000);
       this.ready = info => {
         if (settled || this.proc !== proc) return;
         settled = true; clearTimeout(bootTimer);

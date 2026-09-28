@@ -119,7 +119,7 @@ function findSelfWindow() {
       p.on('error', finish);
       p.on('close', finish);
       // Its own child, stopped if it has not answered in time.
-      setTimeout(() => { if (!done) { try { p.kill(); } catch { /* gone */ } finish(); } }, 5000).unref();
+      setTimeout(() => { if (!done) { try { p.kill(); } catch { /* gone */ } finish(); } }, 15000).unref();
     } catch { finish(); }
   });
   return selfWindowFound;

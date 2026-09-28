@@ -405,7 +405,11 @@ namespace Axon
             "Shell_TrayWnd", "Progman", "WorkerW", "Windows.UI.Core.CoreWindow",
             "Shell_SecondaryTrayWnd", "NotifyIconOverflowWindow",
             "Windows.Internal.Shell.TabProxyWindow", "ForegroundStaging",
-            "MultitaskingViewFrame", "XamlExplorerHostIslandWindow"
+            "MultitaskingViewFrame", "XamlExplorerHostIslandWindow",
+            // The drop shadow Windows draws under a tooltip or menu: a top-level
+            // window of its own, and on 2026-09-28 the "new window" a wait for a
+            // browser's file picker reported instead of the picker.
+            "SysShadow"
         };
 
         static int Main(string[] argv)
@@ -1021,6 +1025,58 @@ namespace Axon
                         e2["popup"] = true;
                         long owner = Hwnd(Native.GetWindowRel(h, 4 /* GW_OWNER */));
                         if (owner != 0) e2["owner"] = owner;
+                        seen[key] = true;
+                        list.Add(e2);
+                    }
+                    catch { }
+                    return true;
+                }, IntPtr.Zero);
+            }
+            catch { }
+
+            // Dialogs the desktop walk leaves out: a browser's Open dialog can run
+            // in another process than the window that owns it, and then it is
+            // missing from the walk above (measured with Opera on 2026-09-28) -
+            // so a wait for the picker found only a drop shadow. Visible, titled,
+            // owned dialog-class windows are added from the system's own list.
+            try
+            {
+                IntPtr fgNow = Native.GetForegroundWindow();
+                Native.EnumWindows(delegate(IntPtr h, IntPtr lp)
+                {
+                    try
+                    {
+                        long key = Hwnd(h);
+                        if (seen.ContainsKey(key)) return true;
+                        if (!Native.IsWindowVisible(h) || Native.IsIconic(h) || Native.IsCloaked(h)) return true;
+                        System.Text.StringBuilder cb = new System.Text.StringBuilder(64);
+                        Native.GetClassName(h, cb, cb.Capacity);
+                        if (cb.ToString() != "#32770") return true;
+                        IntPtr own = Native.GetWindowRel(h, 4 /* GW_OWNER */);
+                        if (own == IntPtr.Zero) return true;
+                        System.Text.StringBuilder sb = new System.Text.StringBuilder(256);
+                        Native.GetWindowTextW(h, sb, sb.Capacity);
+                        if (sb.Length == 0) return true;
+                        Native.RECT rr;
+                        if (!Native.GetWindowRect(h, out rr)) return true;
+                        int rw = rr.Right - rr.Left, rh = rr.Bottom - rr.Top;
+                        if (rw < 40 || rh < 40) return true;
+                        uint wpid;
+                        Native.GetWindowThreadProcessId(h, out wpid);
+                        if ((int)wpid == _selfPid) return true;
+                        string pname, ppath;
+                        ProcessInfo((int)wpid, out pname, out ppath);
+                        Dictionary<string, object> e2 = new Dictionary<string, object>();
+                        e2["hwnd"] = key;
+                        e2["title"] = sb.ToString();
+                        e2["class"] = "#32770";
+                        e2["pid"] = (int)wpid;
+                        e2["process"] = pname;
+                        e2["path"] = ppath;
+                        e2["rect"] = new int[] { rr.Left, rr.Top, rw, rh };
+                        e2["minimized"] = false;
+                        e2["foreground"] = h == fgNow;
+                        e2["owner"] = Hwnd(own);
                         seen[key] = true;
                         list.Add(e2);
                     }
@@ -4272,6 +4328,36 @@ namespace Axon
                 }
                 if (FindFileNameBox(d) == null) continue;
                 return d;
+            }
+            // A browser's file picker can live in another process than the
+            // window that owns it (Opera, measured on 2026-09-28: the Open dialog
+            // in one process, owned by the browser window of another), and the
+            // desktop walk above does not return it. The operating system's own
+            // list of top-level windows does.
+            if (owner != IntPtr.Zero)
+            {
+                AutomationElement found = null;
+                try
+                {
+                    Native.EnumWindows(delegate(IntPtr h, IntPtr lp)
+                    {
+                        if (!Native.IsWindowVisible(h)) return true;
+                        System.Text.StringBuilder sb = new System.Text.StringBuilder(64);
+                        Native.GetClassName(h, sb, sb.Capacity);
+                        if (sb.ToString() != "#32770") return true;
+                        IntPtr o = Native.GetWindowRel(h, 4 /* GW_OWNER */);
+                        if (!(o == owner || (o != IntPtr.Zero && Native.GetWindowRel(o, 4) == owner))) return true;
+                        try
+                        {
+                            AutomationElement d = AutomationElement.FromHandle(h);
+                            if (d != null && FindFileNameBox(d) != null) { found = d; return false; }
+                        }
+                        catch { }
+                        return true;
+                    }, IntPtr.Zero);
+                }
+                catch { }
+                if (found != null) return found;
             }
             return null;
         }
