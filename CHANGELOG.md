@@ -32,14 +32,17 @@ this plugin matched only in spirit are now code, with tests.
   message-type control (Send, Post, Reply all, Upload, Invite, Like, Share)
   be pressed in that app without `confirmed: true` until the session ends.
   Payments, deletions, installs, access and account changes - and any label
-  that names money - are `always_confirm` and cannot be pre-approved. The
-  pre-approval is kept in `Sessions`, in memory only, never in the
+  that names money, a coin or any amount ("Send 0.5 BTC", "Send 50"), or
+  submits a form or application - are `always_confirm` and cannot be
+  pre-approved. The control's own label on screen does not count as the
+  user's words being read off it. The pre-approval is kept in `Sessions`,
+  in memory only, never in the
   registration file or the grants file a resumed conversation restores; it
   ends on close, on a different conversation's id, on `revoke`, and on Stop,
   and a background run still stops at the control.
   `tools/sessions-test.mjs` covers the lifetime (14 new checks),
   `tools/policy-test.mjs` the tiers, the rule and who may pre-approve what
-  (68 new checks, 218 in all).
+  (76 new checks, 226 in all).
 - `tools/astra-test.mjs`'s always-on schema ceiling moves 3970 -> 4030 for
   the two new `computer_grant` arguments (57 tokens), with the argument
   written beside it.

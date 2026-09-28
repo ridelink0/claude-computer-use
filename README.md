@@ -663,7 +663,7 @@ will fix it.
 ```
 node tools/test-all.mjs        every suite below
 node tools/verify.mjs           33  drives real windows end to end, cursor never moves
-node tools/policy-test.mjs     218  tiers, grants, refusals, deny over allow, what needs confirming and who can say yes, pre-approval, what open may hand a file to, the slash-command grant
+node tools/policy-test.mjs     226  tiers, grants, refusals, deny over allow, what needs confirming and who can say yes, pre-approval, what open may hand a file to, the slash-command grant
 node tools/sessions-test.mjs    62  two Claudes: slots, the input lease, dead sessions, how long a pre-approval lasts
 node tools/presence-test.mjs    32  telling you apart from Computer Use, overlay, banner
 node tools/build-test.mjs       15  compile, idempotence, concurrent builds, manifest and marketplace versions agree
