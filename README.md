@@ -666,6 +666,7 @@ node tools/host-test.mjs        57  tree, patterns, input, crash recovery
 node tools/mcp-test.mjs         67  the protocol end to end, prints token costs
 node tools/batch-test.mjs       69  stable indices, deltas, find, waits, runs, tasks, posted input, launch
 node tools/fixes-test.mjs       21  names, landmarks, exclude, find on the printed row, max_nodes, run fields, resumed grants
+node tools/annotations-test.mjs 139  every tool in tools/list, named, has true readOnly/destructive/idempotent/openWorld hints
 node tools/web-test.mjs         31  a web form in an InPrivate Edge window: click states, disabled and re-rendered
                                     buttons, scrolling without the pointer, waits, the foreground coming back
 

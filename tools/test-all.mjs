@@ -17,6 +17,7 @@ const suites = [
   'policy-test.mjs',
   'sessions-test.mjs',
   'astra-test.mjs',
+  'annotations-test.mjs',
   'fixes-test.mjs',
   'build-test.mjs',
   'verify.mjs',

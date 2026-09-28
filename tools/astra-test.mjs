@@ -600,9 +600,18 @@ try {
     // first - 3431 measured, 3398 after - so what is bought here is the two
     // tools, not their wording. Slack stays 27 tokens, a third of what the
     // cheapest tool costs.
+    //
+    // Fifth move, 3425 to 3970, for readOnlyHint/destructiveHint/idempotentHint/
+    // openWorldHint on all 23 tools. Six tools already paid part of this
+    // (readOnlyHint alone); the other three booleans on those six, plus all
+    // four on the other seventeen, is what moved the number - about 22
+    // tokens per tool, paid once here instead of a client guessing wrong and
+    // paying it in a bad parallel-call retry instead. Nothing here was folded
+    // or cut first because there is nothing to fold: each boolean is its own
+    // fact about a different handler, not wording. Slack is 30 tokens.
     const tok = Math.round(chars / 4);
-    assert.ok(tok <= 3425, `schema ~${tok} tokens - over the always-on ceiling. Trim a description or argue the raise in the comment above; do not just move the number.`);
-    console.log(`       schema ~${tok} tokens (ceiling 3425)`);
+    assert.ok(tok <= 3970, `schema ~${tok} tokens - over the always-on ceiling. Trim a description or argue the raise in the comment above; do not just move the number.`);
+    console.log(`       schema ~${tok} tokens (ceiling 3970)`);
     const task = list.result.tools.find((t) => t.name === 'computer_task');
     assert.ok(task.inputSchema.properties.steps);
   });

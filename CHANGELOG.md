@@ -4,6 +4,43 @@ Every released version, newest first, on the tag of the same name. Dates are the
 release commit's own. Anything marked UNVERIFIED was not exercised on real
 hardware at the time it shipped.
 
+## 0.10.2 - 2026-09-28
+
+An independent trust-index review (M8ven) scored 0.10.1 a C, 74/100, on two
+counts: no tool's `annotations` said what its handler actually does beyond
+`readOnlyHint` (6 of 23 tools had that one hint; none had the other three),
+and no test named a tool by its `computer_*` name to check that.
+
+- **Every tool now carries all four MCP annotation booleans** -
+  `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint` -
+  reasoned per handler, not copy-pasted: `computer_click`/`computer_key`/
+  `computer_drag`/`computer_run`/`computer_task`/`computer_paste`/
+  `computer_file_dialog` are `destructiveHint: true` (they can lose or
+  overwrite state that was not the point of the call); `computer_clipboard`
+  joins them, because setting it overwrites the user's existing clipboard
+  with no save/restore, unlike `computer_paste`. `computer_grant`,
+  `computer_recap`, `computer_status` and `computer_turn_ended` are
+  `openWorldHint: false` - they read or write this server's own session
+  state, not the desktop. `tools/annotations-test.mjs` is new: it calls the
+  live server's `tools/list` and asserts, by name, that every tool present is
+  the one expected and that its four hints match a hand-reasoned table -
+  139 assertions across 23 tools (21 off Windows) - and separately that
+  `readOnlyHint` and `destructiveHint` are never both true on the same tool.
+  It is wired into `tools/test-all.mjs`. Raised the always-on schema-token
+  ceiling from 3425 to 3970 in `tools/astra-test.mjs` for the added booleans'
+  real cost, with the same written justification that test has required of
+  every prior move.
+- CI: this repository had none. Added `.github/workflows/ci.yml` on
+  `windows-latest`, running the suites that need no real, idle desktop
+  (`policy-test`, `sessions-test`, `astra-test`, `annotations-test`,
+  `fixes-test`, `build-test`) plus a syntax check of every server, tool, and
+  hook file. `host-test`, `mcp-test`, `batch-test`, `web-test`,
+  `verify.mjs`, and `presence-test.mjs` drive real windows or a real virtual
+  desktop and stay for a human on an idle machine, same as before.
+- No handler behavior changed; `tools/policy-test.mjs` (150/150, including
+  every opt-in-slash-command case) and every other existing suite pass
+  unchanged.
+
 ## 0.10.1 - 2026-09-28
 
 Found by using 0.10.0 for a real job the same night - uploading two

@@ -282,7 +282,24 @@ const bool = { type: 'boolean' };
 // send no input and take no lease - so several windows can be read in one
 // turn. Everything that acts is deliberately left unmarked: those must stay
 // serial, and a sequence of them belongs in computer_run, not in one message.
-const READ_ONLY = { readOnlyHint: true };
+// Every tool below carries explicit MCP annotation booleans - not just the
+// readOnlyHint some already had - so a client can decide what may run
+// unattended or in parallel without guessing from the description text.
+// readOnlyHint: never changes the window, the app, or session state.
+// destructiveHint: this call, used as intended, can lose or overwrite user
+// data or state that was not itself the point of the call (closing a window
+// with unsaved changes, replacing clipboard/field contents, an arbitrary key
+// or step sequence). Only meaningful when readOnlyHint is false.
+// idempotentHint: calling it again with the same arguments right after
+// leaves the world no different from calling it once. Only meaningful when
+// readOnlyHint is false.
+// openWorldHint: acts on or reads the real desktop - arbitrary installed
+// apps and windows outside this server's own state - rather than a closed,
+// fully-enumerable set the server owns itself (its session/grant/journal
+// bookkeeping, or the Stop-hook signal).
+function annotations(readOnlyHint, destructiveHint, idempotentHint, openWorldHint) {
+  return { readOnlyHint, destructiveHint, idempotentHint, openWorldHint };
+}
 
 const SELECTOR = {
   type: 'object',
@@ -312,18 +329,19 @@ const TOOLS = [
   {
     name: 'computer_apps',
     description: 'List visible windows with handle, app, and safety tier. Start here. Menus and popups appear as [menu]/[popup]. installed:"spot" also lists installed apps matching that ("*" for all) for computer_launch.',
-    annotations: READ_ONLY,
+    annotations: annotations(true, false, true, true),
     inputSchema: { type: 'object', properties: { include_hidden: bool, installed: str } },
   },
   {
     name: 'computer_launch',
     description: 'Start an app by name (notepad, spotify, "Visual Studio Code"), Start-menu name, or .exe path and wait for its window. Reading it needs nothing; acting still needs computer_grant.',
+    annotations: annotations(false, false, false, true),
     inputSchema: { type: 'object', required: ['app'], properties: { app: str, args: str, timeout_ms: int } },
   },
   {
     name: 'computer_snapshot',
     description: 'Read a window as an indexed semantic tree (roles, names, ids, states, text including text scrolled out of view). Indices are stable per window; a repeat read returns only what changed. ~15x cheaper than a screenshot. Browsers: shows the page, its URL and tabs.',
-    annotations: READ_ONLY,
+    annotations: annotations(true, false, true, true),
     inputSchema: { type: 'object', properties: {
       hwnd: int, title: str,
       interactive_only: { type: 'boolean', description: 'Actionable elements only. Smaller.' },
@@ -341,12 +359,13 @@ const TOOLS = [
   {
     name: 'computer_screenshot',
     description: 'Capture pixels. Only for canvas UI, charts, games, or visual checks; anything with a tree is cheaper via computer_snapshot.',
-    annotations: READ_ONLY,
+    annotations: annotations(true, false, true, true),
     inputSchema: { type: 'object', properties: { hwnd: int, title: str, max_width: int, quality: int } },
   },
   {
     name: 'computer_grant',
     description: 'Grant or revoke permission to send input to an app, for this session. Reading needs no grant; every click, keystroke, and close does.',
+    annotations: annotations(false, false, true, false),
     inputSchema: { type: 'object', properties: {
       hwnd: int,
       revoke: { type: 'string', description: 'Process name to revoke, or "all".' },
@@ -355,11 +374,13 @@ const TOOLS = [
   {
     name: 'computer_focus',
     description: 'Raise a window and restore it if minimized.',
+    annotations: annotations(false, false, true, true),
     inputSchema: { type: 'object', properties: { hwnd: int, title: str, mode: MODE } },
   },
   {
     name: 'computer_click',
     description: 'Click one element. Uses its accessibility pattern when it has one (no cursor movement, works when partly covered), else a real click. For this click plus the steps you already know follow it, use computer_run instead - one call, not one each.',
+    annotations: annotations(false, true, false, true),
     inputSchema: { type: 'object', properties: {
       ...TARGET,
       button: { type: 'string', enum: ['left', 'right', 'middle'] },
@@ -371,21 +392,25 @@ const TOOLS = [
   {
     name: 'computer_type',
     description: 'Type text into one field. replace:true clears the field first via its value pattern - use that for text boxes. A window that is not in front is typed into without raising it. If a key, click or wait already comes next, put this and those in one computer_run call.',
+    annotations: annotations(false, true, false, true),
     inputSchema: { type: 'object', required: ['text'], properties: { ...TARGET, text: str, replace: bool } },
   },
   {
     name: 'computer_key',
     description: 'Send one key chord: "ctrl+s", "alt+f4", "enter", "f5". A chord that is part of a sequence (ctrl+l, type a URL, enter) belongs in one computer_run call.',
+    annotations: annotations(false, true, false, true),
     inputSchema: { type: 'object', required: ['keys', 'hwnd'], properties: { keys: str, hwnd: int, mode: MODE } },
   },
   {
     name: 'computer_scroll',
     description: 'Scroll an element or its container, or a point. Negative is down; into_view:true brings the element into view. Scroll-then-read-then-click belongs in one computer_run call.',
+    annotations: annotations(false, false, false, true),
     inputSchema: { type: 'object', properties: { ...TARGET, amount: int, horizontal: bool, into_view: bool } },
   },
   {
     name: 'computer_drag',
     description: 'Press at from:[x,y], move, release at to:[x,y] (screen coordinates from with_rects:true). For canvases, sliders, handwriting, 3D viewports. Needs the window in front.',
+    annotations: annotations(false, true, false, true),
     inputSchema: { type: 'object', required: ['hwnd', 'from', 'to'], properties: {
       hwnd: int, from: { type: 'array', items: int }, to: { type: 'array', items: int },
       button: { type: 'string', enum: ['left', 'right', 'middle'] }, steps: int, hold_ms: int, mode: MODE,
@@ -394,12 +419,13 @@ const TOOLS = [
   {
     name: 'computer_appshot',
     description: 'The latest appshot (the user pressed both Ctrl keys with a window in front): its text and picture. now:true captures the foreground window this instant instead.',
-    annotations: READ_ONLY,
+    annotations: annotations(true, false, true, true),
     inputSchema: { type: 'object', properties: { now: bool } },
   },
   {
     name: 'computer_wait_for',
     description: 'Wait until something is true, else wait_timeout. One of: selector (appears; gone:true = disappears), text (any element shows it), change:true (the window differs from your last read; returns the changes), new_window:true (a window appears, e.g. a dialog).',
+    annotations: annotations(true, false, true, true),
     inputSchema: { type: 'object', properties: {
       hwnd: int, title: str, selector: SELECTOR, gone: bool, text: str, change: bool, new_window: bool, timeout_ms: int,
     } },
@@ -407,6 +433,7 @@ const TOOLS = [
   {
     name: 'computer_run',
     description: 'The normal way to act: a batch of steps in ONE call - click, type, paste, key, scroll, wait_for, snapshot, sleep, focus, drag - run in order, stopping at the first failure, ending with what changed. Use it for every sequence you can already name, e.g. steps: [{key:"ctrl+l"}, {type:"https://..."}, {key:"enter"}, {wait_for:{change:true}}]. A step may add hwnd, title or window:"new" to act on another window, optional:true to survive a failure, repeat:N to repeat, timeout_ms for a wait_for (default 5000). Steps pass the same gate a single call would.',
+    annotations: annotations(false, true, false, true),
     inputSchema: { type: 'object', required: ['steps'], properties: {
       hwnd: int, title: str,
       steps: { type: 'array', items: { type: 'object' } },
@@ -418,48 +445,58 @@ const TOOLS = [
   {
     name: 'computer_task',
     description: 'Progress of a background run: its step results so far, or wait up to wait_ms for it to finish. steps:[...] appends steps to it while it runs. cancel:true stops it after the current step.',
+    annotations: annotations(false, true, false, true),
     inputSchema: { type: 'object', properties: { id: str, wait_ms: int, cancel: bool, steps: { type: 'array', items: { type: 'object' } } } },
   },
   {
     name: 'computer_close_window',
     description: 'Ask one window to close, as clicking its X would, so the app can still prompt to save. Computer Use cannot kill processes.',
+    annotations: annotations(false, true, true, true),
     inputSchema: { type: 'object', properties: { hwnd: int, title: str } },
   },
   {
     name: 'computer_clipboard',
     description: 'Read the clipboard text, or set it when text is given.',
+    // destructive: setting it overwrites whatever the user had on the
+    // clipboard, permanently and with no save/restore - unlike computer_paste,
+    // which saves the clipboard first and puts it back after.
+    annotations: annotations(false, true, true, true),
     inputSchema: { type: 'object', properties: { text: str } },
   },
   {
     name: 'computer_paste',
     description: 'Ctrl+V into whatever holds the keyboard focus without touching the user\'s clipboard: it is saved before the paste and restored after. text pastes text. files pastes real files as a file drop (what Explorer\'s Ctrl+C puts on the clipboard), which attaches a document to a mail, a chat or a Word page (a browser upload box on its own is UNVERIFIED - drive its picker with computer_file_dialog). file with as_text pastes that file\'s text contents instead.',
+    annotations: annotations(false, true, false, true),
     inputSchema: { type: 'object', properties: { text: str, file: str, files: { type: 'array', items: str }, as_text: { type: 'boolean' }, hwnd: int, title: str } },
   },
   {
     name: 'computer_open',
     description: 'Open a document or folder the way a double-click in Explorer does, then wait for its window. Documents and folders only: an application goes through computer_launch, and a file whose handler is a blocked or shell app is refused.',
+    annotations: annotations(false, false, false, true),
     inputSchema: { type: 'object', required: ['path'], properties: { path: str, timeout_ms: int } },
   },
   {
     name: 'computer_file_dialog',
     description: 'Drive the Windows Open/Save dialog an app has just shown: put a full path in its File name box and confirm. That is how a file is fetched for an app, or attached after an Upload button opened the picker. action "save" allows a path that does not exist yet; a confirm button labelled Upload or Send is refused once, then confirmed: true.',
+    annotations: annotations(false, true, false, true),
     inputSchema: { type: 'object', required: ['path'], properties: { path: str, action: { type: 'string', enum: ['open', 'save'] }, confirmed: { type: 'boolean' }, hwnd: int, title: str } },
   },
   {
     name: 'computer_status',
     description: 'Host health, DPI mode, grants, running tasks, and token spend this session.',
-    annotations: READ_ONLY,
+    annotations: annotations(true, false, true, false),
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'computer_recap',
     description: 'This session so far: grants, windows worked in, tasks, notes, last actions. Call it after a compaction. find searches the whole journal; note saves a note that survives compaction.',
-    annotations: READ_ONLY,
+    annotations: annotations(false, false, false, false),
     inputSchema: { type: 'object', properties: { last: int, find: str, note: str } },
   },
   {
     name: 'computer_turn_ended',
     description: 'Called by the plugin Stop hook when your turn ends. Not for you to call.',
+    annotations: annotations(false, false, true, false),
     inputSchema: { type: 'object', properties: { session_id: str, reason: str } },
   },
 ];
