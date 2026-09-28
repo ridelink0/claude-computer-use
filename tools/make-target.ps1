@@ -2,7 +2,7 @@
 # Computer Use test target. Nothing pre-existing on the machine is ever used for tests.
 # Prints its window title and PID as JSON, then blocks until closed.
 
-param([switch]$CenterTop)
+param([switch]$CenterTop, [switch]$Right)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -22,6 +22,11 @@ if ($CenterTop) {
     # -25 so the first button's centre lands inside the banner's band, not just
     # below it - the whole point of this position is to sit under the banner.
     $form.Location = New-Object System.Drawing.Point(([int]($w / 2) - 200), -25)
+} elseif ($Right) {
+    # Right edge of the primary screen, clear of a browser window on the left,
+    # for a test that needs "the user's window" beside the one it clicks in.
+    $w = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea.Width
+    $form.Location = New-Object System.Drawing.Point(($w - 560), 120)
 } else {
     $form.Location = New-Object System.Drawing.Point(120, 120)
 }
