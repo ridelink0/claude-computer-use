@@ -79,10 +79,20 @@ that are the same. `no change since s4 (40 elements, same indices)` costs about
 
 - `full: true` when you want the whole listing again (after a long gap, or if
   the earlier read has fallen out of your context).
-- `find: "save"` - only rows whose name, text, id or role match; `/regex/` works.
-  The cheapest way to locate one control in a big window.
+- `find: "save"` - only rows whose name, text, id or role match, or whose
+  printed row does: `/Button "Next/` copied from a listing works. `/regex/`
+  works. The cheapest way to locate one control in a big window. A find that
+  comes back empty right after a navigation is retried for about a second; if
+  the page was still changing it says so - read again rather than concluding
+  the control is absent.
 - `index: 12` - only the subtree under that element (one panel, one list).
-- `interactive_only: true` - controls only. `text_limit`, `max_nodes`,
+  In a browser, landmarks have rows - `Group (main)`, `Group "Sidebar"
+  (navigation)` - so `index` of the main landmark reads just the page content.
+- `exclude: [12]` - leave that subtree out, e.g. a long sidebar you have
+  already seen, so repeat reads stop paying for it.
+- `interactive_only: true` - controls only. `text_limit` (also lifts the
+  70-character cut on names; a paragraph's name gets the text allowance anyway),
+  `max_nodes` (caps the rows shown, after find and the other filters),
   `with_rects` (only for point targeting).
 
 ## Writing a run
@@ -109,6 +119,9 @@ Per-step fields:
   sequence follows a dialog it just caused: `{ key: "ctrl+s" }`, then
   `{ type: { text: "notes.txt" }, window: "new" }`, then
   `{ key: "enter", window: "new" }`.
+- `timeout_ms` - how long a `wait_for` step waits (default 5000), e.g.
+  `{ wait_for: { text: "Validation passed" }, timeout_ms: 30000 }`. A field the
+  runner does not know is refused as `invalid_steps`, never ignored.
 - `optional: true` - a failure here does not stop the run. For the step that
   dismisses a banner that may not be there.
 - `repeat: N` - run this step N times, up to 20. `{ key: "tab", repeat: 4 }`.
@@ -256,6 +269,15 @@ things they can feel: moving the pointer and taking the foreground.
   acting on. Reads never do, and posted typing never does (next point). So if
   the user must keep their foreground, read and type freely, and expect a click
   to surface the window.
+- **The foreground comes back.** When an action takes the foreground from the
+  window the user was in, it is handed back when that single action ends, or
+  when the whole run ends - `Foreground given back to "..."` in the result.
+  So do the keys and typing that need the window in front inside one
+  `computer_run`, not as separate calls. While a menu or dropdown the action
+  opened is showing, the window stays in front until the next action.
+- **A click reports the state after it**: `now On`, `selected=true`. When the
+  app had not updated it 0.7 s later the result says the state is unconfirmed;
+  re-read that element before relying on it.
 - **Typing into a window behind the user's** is also quiet: `computer_type
   { index, text }` on a window that is not in front posts the characters
   straight to the control, reads the control back to confirm, and only falls
@@ -285,7 +307,9 @@ reading and pattern parts now and retry the rest later.
 
 | code | do |
 |---|---|
-| `element_stale` | the control is gone; re-read the window |
+| `element_stale` | the control is gone; re-read the window. (An index whose element was replaced by an identical one - a React re-render - is re-found by name and role first, and the result says so.) |
+| `element_disabled` | the control is disabled, so a click would do nothing; finish the form or wait for it to enable, then click. Nothing was clicked |
+| `slash_only` | this Claude Code terminal is granted slash commands only: type one `/command` line, then key `enter` |
 | `index_out_of_range` | not an index of this window; read it (`find` is cheapest) |
 | `not_granted` | `computer_grant { hwnd }` |
 | `needs_confirmation` | say what the control will do, get the user's answer, repeat with `confirmed: true` |
@@ -322,6 +346,9 @@ for this session only. Tiers, from `computer_apps`:
   response says what that app reaches. Keep the task narrow and say what you
   are about to do first.
 - `shell` - terminals, editors, the Run dialog. Readable, never typeable.
+  The one exception is opt-in by the user in the plugin settings: another
+  Claude Code terminal can then be granted slash commands only (one `/command`
+  line, then Enter within 20 s). Never offer to turn that setting on yourself.
 - `blocked` - password managers, UAC prompts, login screens, Windows Security.
   Not even readable; their tree holds the secrets in plain text. No setting
   lifts this.

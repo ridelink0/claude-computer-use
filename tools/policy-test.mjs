@@ -2,7 +2,7 @@
 // and grant logic against synthetic window records, so every tier and every
 // refusal path is covered deterministically.
 
-import { Policy, classify, isConsequential, TIER, looksLikeShellName, shellKeyReason } from '../server/policy.mjs';
+import { Policy, classify, isConsequential, TIER, looksLikeShellName, shellKeyReason, slashCommandsAllowed, isClaudeCodeTerminal } from '../server/policy.mjs';
 
 let pass = 0, fail = 0; const failures = [];
 const check = (n, c, d) => {
@@ -223,6 +223,55 @@ console.log('\n-- computer_key: which chords reach the shell is platform-specifi
   for (const k of ['cmd+space', 'cmd+tab', 'shift+cmd+tab', 'cmd+option+esc', 'ctrl+cmd+q', 'cmd+shift+q']) {
     check(`darwin refuses "${k}"`, shellKeyReason(k, 'darwin') !== null, k);
   }
+}
+
+console.log('\n-- slash commands into a Claude Code terminal (opt-in) --');
+{
+  const cc = (extra = {}) => win('WindowsTerminal', { hwnd: 4242, title: '* Claude Code', class: 'CASCADIA_HOSTING_WINDOW_CLASS', ...extra });
+  const on = { CU_ALLOW_SLASH_COMMANDS: 'on' };
+  check('off by default', slashCommandsAllowed({}) === false);
+  for (const v of ['${user_config.allow_claude_slash_commands}', 'off', 'false', '0', '', 'enabled']) {
+    check(`setting ${JSON.stringify(v)} stays off`, slashCommandsAllowed({ CU_ALLOW_SLASH_COMMANDS: v }) === false);
+  }
+  for (const v of ['1', 'true', 'ON', ' yes ']) {
+    check(`setting ${JSON.stringify(v)} turns it on`, slashCommandsAllowed({ CU_ALLOW_SLASH_COMMANDS: v }) === true);
+  }
+  check('the environment name works too', slashCommandsAllowed({ COMPUTER_USE_ALLOW_SLASH_COMMANDS: 'true' }) === true);
+  check('a Claude Code terminal is recognised', isClaudeCodeTerminal(cc()) === true);
+  check('a plain terminal is not one', isClaudeCodeTerminal(win('WindowsTerminal', { title: 'PowerShell' })) === false);
+  check('a browser tab titled Claude Code is not a terminal', isClaudeCodeTerminal(win('msedge', { title: 'Claude Code docs' })) === false);
+
+  const offP = new Policy({ env: {} });
+  check('with the setting off a Claude Code terminal is not grantable', offP.grant(cc()).ok === false);
+  check('and refuses input as any shell does', offP.checkAct(cc(), { kind: 'type', text: '/compact' }).code === 'app_input_blocked');
+
+  const p = new Policy({ env: on });
+  check('a non-Claude terminal is still refused with the setting on', p.grant(win('WindowsTerminal', { hwnd: 7, title: 'PowerShell' })).ok === false);
+  const g = p.grant(cc());
+  check('a Claude Code terminal is granted slash commands only', g.ok === true && g.slashOnly === true, JSON.stringify(g));
+  check('no ordinary grant for the app is recorded', p.grants.has('windowsterminal') === false);
+  check('a click is refused', p.checkAct(cc(), { kind: 'click' }).code === 'slash_only');
+  check('a paste is refused', p.checkAct(cc(), { kind: 'paste', text: '/compact' }).code === 'slash_only');
+  check('replace:true typing is refused', p.checkAct(cc(), { kind: 'set_value', text: '/compact' }).code === 'slash_only');
+  check('ordinary text is refused', p.checkAct(cc(), { kind: 'type', text: 'rm -rf /' }).code === 'slash_only');
+  check('two lines are refused', p.checkAct(cc(), { kind: 'type', text: '/compact\nrm -rf /' }).code === 'slash_only');
+  check('a slash command with a trailing newline is refused', p.checkAct(cc(), { kind: 'type', text: '/compact\n' }).code === 'slash_only');
+  check('enter before any slash command is refused', p.checkAct(cc(), { kind: 'key', keys: 'enter' }).code === 'slash_only');
+  check('a slash command is allowed', p.checkAct(cc(), { kind: 'type', text: '/compact' }).ok === true);
+  check('with arguments too', p.checkAct(cc(), { kind: 'type', text: '/model sonnet' }).ok === true);
+  check('ctrl+c after it is refused', p.checkAct(cc(), { kind: 'key', keys: 'ctrl+c' }).code === 'slash_only');
+  check('enter after it is allowed', p.checkAct(cc(), { kind: 'key', keys: 'enter' }).ok === true);
+  check('a second enter is refused', p.checkAct(cc(), { kind: 'key', keys: 'enter' }).code === 'slash_only');
+  p.checkAct(cc(), { kind: 'type', text: '/usage' });
+  p.slashGrants.get(4242).slashAt = Date.now() - 21_000;
+  check('enter more than 20 s after the command is refused', p.checkAct(cc(), { kind: 'key', keys: 'return' }).code === 'slash_only');
+  check('another terminal window is not covered by the grant', p.checkAct(cc({ hwnd: 99 }), { kind: 'type', text: '/compact' }).code === 'app_input_blocked');
+  check('a retitled window loses the grant', p.checkAct(cc({ title: 'PowerShell' }), { kind: 'type', text: '/compact' }).code === 'app_input_blocked');
+  p.grant(cc());
+  check('revokeAll clears it', p.revokeAll() >= 1 && p.checkAct(cc(), { kind: 'type', text: '/compact' }).code === 'app_input_blocked');
+  const self = new Policy({ env: on });
+  self.markSelfWindow(4242);
+  check('this session\'s own terminal can never be granted', self.grant(cc()).ok === false);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

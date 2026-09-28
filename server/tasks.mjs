@@ -18,7 +18,12 @@
 const STEP_KINDS = ['click', 'type', 'key', 'scroll', 'wait_for', 'snapshot', 'sleep', 'focus', 'drag', 'paste', 'open', 'file_dialog'];
 
 // Per-step fields that change how a step runs rather than what it does.
-const STEP_EXTRAS = ['confirmed', 'mode', 'background', 'physical'];
+// timeout_ms is here so a wait written as {wait_for:{...}, timeout_ms:30000}
+// means what it says; inside the wait_for object it always did.
+const STEP_EXTRAS = ['confirmed', 'mode', 'background', 'physical', 'timeout_ms'];
+
+// Everything else a step may carry beside its kind.
+const STEP_KEYS = new Set([...STEP_EXTRAS, 'optional', 'repeat', 'hwnd', 'title', 'window']);
 
 // A step may name its own window. Without one it runs on the run's window.
 const TARGET_KEYS = ['hwnd', 'title', 'window'];
@@ -50,6 +55,13 @@ export function parseStep(step, n) {
     throw new Error(`step ${n} needs exactly one of ${STEP_KINDS.join(', ')}`);
   }
   const kind = kinds[0];
+  // A field the runner does not know is refused rather than ignored: a
+  // timeout written beside a wait used to be dropped without a word, and the
+  // wait timed out at its 5 s default in the middle of a 30 s server check.
+  const unknown = Object.keys(step).filter((k) => k !== kind && !STEP_KEYS.has(k));
+  if (unknown.length) {
+    throw new Error(`step ${n}: unknown field${unknown.length > 1 ? 's' : ''} ${unknown.join(', ')} - a step takes its kind plus ${[...STEP_KEYS].join(', ')}`);
+  }
   let v = step[kind];
   if (kind === 'key' && typeof v === 'string') v = { keys: v };
   if (kind === 'sleep' && typeof v === 'number') v = { ms: v };
@@ -246,6 +258,13 @@ export class Tasks {
       } else {
         touched.add(hwnd);
         lastHwnd = hwnd; lastTitle = title;
+        // An action followed by a wait for change: the server may take the
+        // "before" picture now, so the wait reports what this action changed.
+        const next = plan[i + 1];
+        const sameWindow = JSON.stringify((next && next.target) || null) === JSON.stringify(target || null);
+        if (ctx.beforeAction && next && sameWindow && next.kind === 'wait_for' && next.args && next.args.change && kind !== 'wait_for' && kind !== 'snapshot') {
+          try { await ctx.beforeAction(hwnd); } catch { /* the wait falls back to the last read */ }
+        }
         r = await call(kind, { ...args, hwnd });
       }
       const ms = Date.now() - started;
@@ -264,7 +283,10 @@ export class Tasks {
         if (task) { task.lines = lines.slice(); task.done = i + 1; }
         if (halted) { stoppedAt = i + 1; reason = HALT_STOPPED; break; }
         if (!optional && stopOnError) { stoppedAt = i + 1; reason = HALT_FAILED; break; }
-      } else if (kind === 'snapshot') {
+      } else if (kind === 'snapshot' || (kind === 'wait_for' && args.change)) {
+        // A read, and a wait for change, keep their full text: the wait's
+        // delta is what changed, and it becomes the baseline the closing read
+        // compares against, so cut to one line it never reached the model.
         lines.push(`${label}: (${ms}ms)\n${r.text}`);
       } else {
         lines.push(`${label}: ${briefResult(r.text)} (${ms}ms)`);

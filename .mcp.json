@@ -14,7 +14,8 @@
         "CU_CONFIRM": "${user_config.confirm_consequential}",
         "CU_DESKTOP_SCOPE": "${user_config.desktop_scope}",
         "CU_BACKGROUND_AT_TURN_END": "${user_config.background_at_turn_end}",
-        "CU_APPSHOT": "${user_config.appshot_hotkey}"
+        "CU_APPSHOT": "${user_config.appshot_hotkey}",
+        "CU_ALLOW_SLASH_COMMANDS": "${user_config.allow_claude_slash_commands}"
       }
     }
   }

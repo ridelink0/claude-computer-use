@@ -52,6 +52,8 @@ namespace Axon
         const int LLKHF_INJECTED = 0x0010;
         const uint WM_QUIT = 0x0012;
         const uint WM_MOUSEMOVE = 0x0200;
+        const uint WM_MOUSEWHEEL = 0x020A;
+        const uint WM_MOUSEHWHEEL = 0x020E;
 
         // Field offsets into the hook structs, so the callback can read the one
         // int it needs without marshalling a whole structure per event.
@@ -71,6 +73,7 @@ namespace Axon
         static long _injectedEvents;
         static int _lastKind;           // 1 = mouse, 2 = keyboard
         static long _commitWindow;      // which window the user last acted IN
+        static long _lastClickTicks;    // their last real mouse-button press
         static long _lastSelfInject;    // when Computer Use itself last sent input
         static uint _threadId;
         static volatile bool _hooksOk;
@@ -182,6 +185,9 @@ namespace Axon
                     {
                         Interlocked.Exchange(ref _lastCommitTicks, now);
                         Interlocked.Exchange(ref _commitWindow, (long)GetForegroundWindow());
+                        // A button press, not a wheel turn: where they chose to be.
+                        if ((uint)wParam != WM_MOUSEWHEEL && (uint)wParam != WM_MOUSEHWHEEL)
+                            Interlocked.Exchange(ref _lastClickTicks, now);
                     }
                 }
             }
@@ -269,6 +275,11 @@ namespace Axon
         // busy somewhere" apart from "they are busy in the window I want", which
         // is the difference between coexisting and getting in their way.
         internal static long CommitWindow { get { return Interlocked.Read(ref _commitWindow); } }
+
+        // When the user last pressed a mouse button themselves, in UTC ticks (0
+        // for never). A click is a choice of window, which the foreground
+        // give-back respects rather than undoes.
+        internal static long LastUserClickTicks { get { return Interlocked.Read(ref _lastClickTicks); } }
 
         internal static bool Busy(int thresholdMs)
         {

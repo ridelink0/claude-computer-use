@@ -82,7 +82,11 @@ function writeJson(file, obj) {
 }
 
 export class Sessions {
-  constructor({ dir, pid = process.pid, now = () => Date.now(), sleep, isAlive } = {}) {
+  constructor({ dir, pid = process.pid, now = () => Date.now(), sleep, isAlive, sessionId = null } = {}) {
+    // The Claude Code session (conversation) this server belongs to. A resumed
+    // conversation keeps its id and gets a new server process, so this is what
+    // tells "an earlier process of this same conversation" from another Claude.
+    this.sessionId = sessionId || null;
     this.dir = dir || path.join(dataDir(), 'sessions');
     this.lease = path.join(this.dir, 'input.lease');
     this.pid = pid;
@@ -118,6 +122,7 @@ export class Sessions {
       seen: this.now(),
       host: os.hostname(),
       cwd: process.cwd(),
+      session_id: this.sessionId || undefined,
       ...extra,
     };
     writeJson(this.file, this.me);
@@ -139,6 +144,18 @@ export class Sessions {
       writeJson(this.file, this.me);
     }
     return this.me;
+  }
+
+  // The Stop hook names the session; a server started without the id learns it.
+  setSessionId(id) {
+    if (!id || id === this.sessionId) return;
+    this.sessionId = String(id);
+    if (this.me) { this.me.session_id = this.sessionId; writeJson(this.file, this.me); }
+  }
+
+  // A peer that is this same conversation in an earlier process.
+  sameConversation(p) {
+    return !!(this.sessionId && p && p.session_id && String(p.session_id) === this.sessionId);
   }
 
   // Called on every tool call. Cheap, and it is what makes a crashed session
@@ -276,14 +293,25 @@ export class Sessions {
     // it only the first time.
     if (!always && sig === this._noteSig && !clash.length) return '';
     this._noteSig = sig;
-    const who = peers.map((p) => {
+    const describePeer = (p) => {
       const what = p.last_op
         ? `${p.last_op}${p.last_title ? ` in "${p.last_title}"` : ''} ${Math.round((this.now() - Number(p.last_at || 0)) / 1000)}s ago`
         : 'no actions yet';
       return `${p.label} (pid ${p.pid}${p.idle ? ', idle' : ''}): ${what}`;
-    }).join('; ');
-    let s = `[${peers.length} other Claude session${peers.length > 1 ? 's share' : ' shares'} this desktop: ${who}. ` +
-            `Input is serialised; grants and snapshots are not shared.]\n`;
+    };
+    // After a resume the conversation's previous server can still be alive.
+    // It is this conversation, not another Claude, and is named as such.
+    const mine = peers.filter((p) => this.sameConversation(p));
+    const others = peers.filter((p) => !this.sameConversation(p));
+    let s = '';
+    if (others.length) {
+      const whoElse = others.map(describePeer).join('; ');
+      s += `[${others.length} other Claude session${others.length > 1 ? 's share' : ' shares'} this desktop: ${whoElse}. ` +
+           `Input is serialised; grants and snapshots are not shared.]\n`;
+    }
+    if (mine.length) {
+      s += `[an earlier process of this same conversation is still running (pid ${mine.map((p) => p.pid).join(', ')}, from before a resume); input is serialised with it.]\n`;
+    }
     if (clash.length) {
       s += `[WARNING: ${clash.map((p) => p.label).join(', ')} acted in THIS SAME WINDOW moments ago. ` +
            `Two agents editing one window will corrupt each other's work - say so and check with the user before continuing.]\n`;

@@ -139,14 +139,56 @@ export function findMatcher(pattern) {
   const s = String(pattern || '');
   const m = /^\/(.+)\/([a-z]*)$/.exec(s);
   if (m) {
-    try { return new RegExp(m[1], m[2].includes('i') ? m[2] : m[2] + 'i'); } catch { /* literal */ }
+    // g and y make test() remember where it stopped, and a node is now tested
+    // against several strings in turn, so they are dropped.
+    const flags = m[2].replace(/[gy]/g, '');
+    try { return new RegExp(m[1], flags.includes('i') ? flags : flags + 'i'); } catch { /* literal */ }
   }
   const lit = s.toLowerCase();
   return { test: (t) => String(t).toLowerCase().includes(lit) };
 }
 
+// The row as a listing prints it - role, full name, id, landmark, flags and
+// text - so a find written against what a read showed, such as
+// /Button "Next/ or /RadioButton "(No|Yes)/, matches the row it was copied from.
+export function printedRow(n) {
+  const st = n.state || {};
+  const name = flat(n.name);
+  const txt = flat(n.text);
+  let line = n.role || '';
+  if (name) line += ` "${name}"`;
+  if (n.landmark) line += ` (${n.landmark})`;
+  if (n.aid && n.aid !== name) line += ` #${n.aid}`;
+  const flags = [];
+  if (st.disabled) flags.push('disabled');
+  if (st.toggle) flags.push(`toggle=${st.toggle}`);
+  if (st.selected === true) flags.push('selected');
+  if (st.expand) flags.push(String(st.expand).toLowerCase());
+  if (flags.length) line += ` {${flags.join(' ')}}`;
+  if (txt && txt !== name) line += ` = ${JSON.stringify(txt)}`;
+  return line;
+}
+
+// Each field on its own, and the printed row as a whole.
 export function nodeMatches(n, matcher) {
-  return matcher.test(flat(n.name)) || matcher.test(flat(n.text)) || matcher.test(n.aid || '') || matcher.test(n.role || '');
+  return matcher.test(flat(n.name)) || matcher.test(flat(n.text)) || matcher.test(n.aid || '') || matcher.test(n.role || '')
+    || matcher.test(printedRow(n));
+}
+
+// The nodes with the subtrees under these indices left out, for a read that
+// does not want to see a sidebar it has already seen.
+export function excludeSubtrees(nodes, indices) {
+  const drop = new Set((indices || []).map(Number));
+  if (!drop.size) return nodes || [];
+  const out = [];
+  let skipDepth = -1;
+  for (const n of nodes || []) {
+    if (skipDepth >= 0 && n.depth > skipDepth) continue;
+    skipDepth = -1;
+    if (drop.has(Number(n.i))) { skipDepth = n.depth; continue; }
+    out.push(n);
+  }
+  return out;
 }
 
 // Whether a node survives into the listing at all. A node with no name, no
@@ -159,14 +201,26 @@ function describable(n) {
   const acts = (n.patterns || []).some((p) => ACTIONABLE.has(p));
   const name = flat(n.name);
   const txt = flat(n.text);
-  if (!name && !n.aid && !txt && !acts) return false;
+  if (!name && !n.aid && !txt && !acts && !n.landmark) return false;
   if (n.role === 'Text' && !n.aid && !acts && SEPARATOR.test(name) && !txt) return false;
   return true;
 }
 
 // The per-element lines, before any header. Each row carries its stable
 // index so a later read can be compared against this one row by row.
-export function buildRows(snap, { textLimit = 200, withRects = false, chrome = false, nodes: only = null } = {}) {
+// Roles whose name IS their content: a paragraph, a list item, a cell. Their
+// names get the text allowance; a button's or a link's stays short.
+const CONTENT_ROLES = new Set(['Text', 'ListItem', 'DataItem', 'TreeItem', 'Document', 'Group', 'Custom', 'HeaderItem']);
+
+// A long name is cut with its length, so the reader knows to raise text_limit.
+function nameCut(s, max) {
+  const f = flat(s);
+  if (f.length <= max) return f;
+  return f.slice(0, max - 1) + `… [${f.length} chars]`;
+}
+
+export function buildRows(snap, { textLimit = null, withRects = false, chrome = false, nodes: only = null } = {}) {
+  const limit = Number(textLimit) > 0 ? Number(textLimit) : 200;
   const nodes = only || snap.nodes || [];
   const page = snap.web && !chrome ? splitBrowser(snap.nodes || []) : null;
   const hasPage = page && page.size > 0;
@@ -204,7 +258,12 @@ export function buildRows(snap, { textLimit = 200, withRects = false, chrome = f
     shown.push(n.depth);
 
     let line = `${indent} ${n.role}`;
-    if (name) line += ` "${oneLine(name, 70)}"`;
+    // A name is cut at 70 characters, or at text_limit when one is given; a
+    // name that is the content itself gets the text allowance either way. It
+    // was a flat 70 whatever text_limit said, and a page's validation messages
+    // could only be read from a screenshot.
+    if (name) line += ` "${nameCut(name, Number(textLimit) > 0 ? limit : (CONTENT_ROLES.has(n.role) ? limit : 70))}"`;
+    if (n.landmark) line += ` (${n.landmark})`;
     if (n.aid && n.aid !== name && !/^view_\d+$/.test(n.aid)) line += ` #${n.aid}`;
     if (withRects) line += rect(n.rect);
 
@@ -237,7 +296,7 @@ export function buildRows(snap, { textLimit = 200, withRects = false, chrome = f
       } else if (txt.length <= 60) {
         line += ` = ${JSON.stringify(txt)}`;
       } else {
-        line += `\n${indent}      = ${preview(n.text, textLimit)}`;
+        line += `\n${indent}      = ${preview(n.text, limit)}`;
       }
     }
     const row = { i: Number(n.i), line, role: n.role, name };
@@ -366,11 +425,18 @@ function otherDesktopNote(snap) {
   return 'ON ANOTHER VIRTUAL DESKTOP: only the frame is readable (Windows does not serve the contents of a window on a desktop you are not looking at); its coordinates are not on screen, so do not click by point. Bring that desktop forward first';
 }
 
-export function renderSnapshot(snap, { textLimit = 200, withRects = false, lean = false, chrome = false, ms = null, nodes = null, scope = null } = {}) {
+export function renderSnapshot(snap, { textLimit = null, withRects = false, lean = false, chrome = false, ms = null, nodes = null, scope = null, maxRows = null, note = '' } = {}) {
   const built = buildRows(snap, { textLimit, withRects, chrome, nodes });
-  const { rows, url, pruned, hiddenChrome, focus } = built;
+  const { url, pruned, hiddenChrome, focus } = built;
+  // max_nodes caps what is shown, after browser chrome, layout wrappers and
+  // any find or controls-only filter are gone - not the walk, where it used
+  // to cut a page off before its first row (the browser's toolbar comes first).
+  const cap = Number(maxRows) > 0 ? Number(maxRows) : 0;
+  const rows = cap && built.rows.length > cap ? built.rows.slice(0, cap) : built.rows;
 
   let count = `${rows.length} shown`;
+  if (rows.length < built.rows.length) count += ` of ${built.rows.length} (max_nodes)`;
+  if (note) count += ', ' + note;
   if (scope) count = `${scope}: ${count}`;
   if (hiddenChrome) count += `, ${hiddenChrome} browser controls hidden (chrome:true)`;
   else if (pruned) count += `, ${pruned} layout-only hidden`;

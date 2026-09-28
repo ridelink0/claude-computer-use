@@ -4,6 +4,81 @@ Every released version, newest first, on the tag of the same name. Dates are the
 release commit's own. Anything marked UNVERIFIED was not exercised on real
 hardware at the time it shipped.
 
+## 0.10.0 - 2026-09-28
+
+Sixteen problems found on 2026-09-26 while filling in a web form in a
+Chromium browser with Computer Use on the user's own desktop, each fixed and
+tested, plus one opt-in grant.
+
+- **The foreground comes back.** A real click activates its window and keys
+  need theirs in front, and the pointer was put back but the foreground was
+  not: a physical click on a browser on the user's second monitor left it in
+  front, and their typing went there. The host now remembers the window that
+  was in front before the first action that takes the foreground and hands it
+  back when a single action or a whole run ends (new host op `give_back`). Not
+  while a menu or dropdown the target opened is showing - a Chromium `<select>`
+  list is an owned, non-activating `Chrome_WidgetWin_1` popup, measured - not
+  when the user has clicked somewhere since, not in `take` or `exclusive`.
+- **A disabled control is refused, not clicked for real.** Root cause of the
+  "went via physical although an invokable Button existed" report: the Next
+  button was disabled until the form was valid, its Invoke pattern refused
+  (ElementNotEnabled), and the click silently fell through to a physical one -
+  which pressed nothing and took the foreground. Now `element_disabled`
+  (`physical: true` still forces a real click). Any other pattern failure that
+  falls through to a real click says which pattern failed and why.
+- **A click reports the state after it.** A browser updates its
+  accessibility tree a beat after the page, so Toggle, SelectionItem and
+  ExpandCollapse clicks reported the old state ("now Off" on check boxes that
+  were On). Every click path now waits up to 0.7 s for the state the click
+  should move, and says "unconfirmed" when it had not moved.
+- **Names are not cut at 70 characters regardless.** `text_limit` now applies
+  to names, and a paragraph, list item or cell - whose name is its content -
+  gets the text allowance by default. A cut name says how long it was.
+- **`max_nodes` caps what is shown, after the filters.** It used to limit the
+  walk, so a find or a controls-only read of a browser never got past the
+  toolbar (browser chrome comes first in tree order), and a run's closing read
+  repeated the cut.
+- **`find` matches the printed row too**, so `/Button "Next/` copied from a
+  listing finds that row. A find that comes back empty is retried for about a
+  second, and says "the tree was still changing" instead of "no match" when
+  the page had not settled.
+- **Landmarks and `exclude`.** Page landmarks get rows (`Group (main)`,
+  `Group "Sidebar" (navigation)`), so `index` reads the main content alone,
+  and the new `exclude: [i]` leaves a subtree - a long sidebar - out of reads.
+- **Scrolling an element uses its container's Scroll pattern**, not the
+  mouse wheel (which needs the pointer and refused with `user_busy` while the
+  user moved the mouse). New `into_view: true` scrolls the element into view
+  through ScrollItem. The wheel is the last resort.
+- **A stale index is re-found**: when a re-render replaced an element (React,
+  disabled to enabled), the one element now carrying the same name and role
+  is used, and the result says so. More than one match keeps `element_stale`.
+- **Runs**: `timeout_ms` is a step field for `wait_for` (a 30 s server check no
+  longer dies at the 5 s default), an unknown step field is refused instead of
+  ignored, and a `wait_for {change}` step keeps its whole delta in the run
+  output instead of a truncated line the closing read then called "no change".
+- **`wait_for {change}` compares against the latest read of the window** -
+  any read, a find included - taken whole, not the last full listing with its
+  `max_nodes`. A run takes a fresh "before" read ahead of an action followed by
+  such a wait when the latest one predates an earlier action.
+- **A resumed conversation keeps its grants**, saved per Claude Code session
+  id and restored by the next server process of that session (a Stop clears
+  them), and its earlier, still-running process is named as that - not as
+  "1 other Claude session".
+- **The session's own terminal is excluded from listings.** Claude Code's
+  process owns no window; Windows Terminal draws it, so the old pid rule never
+  matched. The host, run once as a helper, attaches to the session's console
+  and takes the root owner of the console window, which is the terminal window.
+- **Opt-in: slash commands into another Claude Code terminal.** Off unless the
+  new setting `allow_claude_slash_commands` is on. Then a terminal titled
+  "Claude Code" can be granted slash commands only: one `/command` line, then
+  Enter within 20 s; anything else there is refused with `slash_only`. The
+  README states the risk. Verified by typing `/help` and Enter into a
+  throwaway Windows Terminal window, in front and behind.
+- Tests: new `fixes-test` (pure logic) and `web-test` (the page above, in an
+  InPrivate Microsoft Edge window, through the MCP server), both in `test-all`;
+  `policy-test` gains the slash-command grant. Shared schema wording trimmed so
+  the tool listing is smaller than 0.9.6's despite the new options.
+
 ## 0.9.6 - 2026-09-25
 
 Found by reproducing the batch-test suite on a loaded machine (CPU pinned at

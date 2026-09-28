@@ -89,6 +89,23 @@ namespace Axon
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
         [DllImport("user32.dll")] internal static extern bool GetGUIThreadInfo(uint tid, ref GUITHREADINFO info);
         [DllImport("user32.dll")] internal static extern bool ScreenToClient(IntPtr h, ref POINT p);
+        // The console a process is attached to, and through it the terminal
+        // window that shows this Claude Code session (see ConsoleWindowOf).
+        [DllImport("kernel32.dll")] internal static extern bool AttachConsole(uint pid);
+        [DllImport("kernel32.dll")] internal static extern bool FreeConsole();
+        [DllImport("kernel32.dll")] internal static extern IntPtr GetConsoleWindow();
+        [DllImport("kernel32.dll", SetLastError = true)] internal static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] internal static extern bool Process32FirstW(IntPtr snap, ref PROCESSENTRY32W e);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] internal static extern bool Process32NextW(IntPtr snap, ref PROCESSENTRY32W e);
+        [DllImport("kernel32.dll")] internal static extern bool CloseHandle(IntPtr h);
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct PROCESSENTRY32W
+        {
+            public uint dwSize; public uint cntUsage; public uint th32ProcessID; public IntPtr th32DefaultHeapID;
+            public uint th32ModuleID; public uint cntThreads; public uint th32ParentProcessID; public int pcPriClassBase;
+            public uint dwFlags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExeFile;
+        }
         // Which executable the shell would run for a file type's "open" verb -
         // the same association lookup ShellExecute makes, asked without running it.
         [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)] internal static extern int AssocQueryStringW(uint flags, int str, string assoc, string extra, System.Text.StringBuilder outBuf, ref uint outLen);
@@ -398,6 +415,10 @@ namespace Axon
             // on a call, then leave.
             bool warmup = false;
             foreach (string s in argv) if (s == "--warmup") warmup = true;
+            // A one-shot helper run, never the long-lived host: which terminal
+            // window shows the Claude Code session that started this server.
+            for (int ai = 0; ai + 1 < argv.Length; ai++)
+                if (argv[ai] == "--console-window") return ConsoleWindowOf(argv[ai + 1]);
             if (warmup)
             {
                 try
@@ -507,8 +528,16 @@ namespace Axon
                     System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
                     object result;
                     _busy = IsActingOp(op);
+                    // Which window the user had in front before this action,
+                    // so a foreground the action takes can be handed back.
+                    bool tracked = BorrowTracked(op, a);
+                    IntPtr fgBefore = tracked ? Native.GetForegroundWindow() : IntPtr.Zero;
                     try { result = Dispatch(op, a); }
-                    finally { _busy = false; sw.Stop(); }
+                    finally
+                    {
+                        _busy = false; sw.Stop();
+                        if (tracked) { try { NoteBorrow(fgBefore, a); } catch { } }
+                    }
                     Respond(reqId, result, sw.ElapsedMilliseconds);
                 }
                 catch (AxonError ax)
@@ -563,6 +592,7 @@ namespace Axon
                 case "busy": return OpBusy(a);
                 case "banner": return OpBanner(a);
                 case "drag": return OpDrag(a);
+                case "give_back": return OpGiveBack(a);
                 default: throw new AxonError("unknown_op", "Unknown operation '" + op + "'.");
             }
         }
@@ -1204,6 +1234,9 @@ namespace Axon
 
         static CacheRequest _snapReq;
 
+        static readonly string[] Landmarks = new string[]
+        { "main", "navigation", "complementary", "banner", "contentinfo", "content information", "region", "search", "form" };
+
         static CacheRequest SnapRequest()
         {
             if (_snapReq != null) return _snapReq;
@@ -1236,6 +1269,9 @@ namespace Axon
             cr.Add(RangeValuePattern.ValueProperty);
             cr.Add(RangeValuePattern.MinimumProperty);
             cr.Add(RangeValuePattern.MaximumProperty);
+            // Chromium names a page landmark (main, navigation, ...) here, and
+            // an unnamed landmark would otherwise be an invisible wrapper.
+            cr.Add(AutomationElement.LocalizedControlTypeProperty);
             _snapReq = cr;
             return cr;
         }
@@ -1499,6 +1535,13 @@ namespace Axon
                         if (!string.IsNullOrEmpty(aid)) node["aid"] = aid;
                         if (rect != null) node["rect"] = rect;
                         if (patterns.Count > 0) node["patterns"] = patterns;
+                        // A page landmark, so a sidebar or the main content can be
+                        // read alone (index) or left out of a read (exclude).
+                        if (web && role == "Group")
+                        {
+                            string lct = CachedProp(el, AutomationElement.LocalizedControlTypeProperty) as string;
+                            if (lct != null && Array.IndexOf(Landmarks, lct.ToLowerInvariant()) >= 0) node["landmark"] = lct.ToLowerInvariant();
+                        }
 
                         // Text: the value pattern is cached and free. The text
                         // pattern is a live call, so it is spent only where it
@@ -2036,6 +2079,19 @@ namespace Axon
                 throw new AxonError("bad_selector", "Selector needs at least one of automation_id, name, or role.", null);
 
             Condition cond = conds.Count == 1 ? conds[0] : new AndCondition(conds.ToArray());
+            // unique:true is the stale-index fallback: it may only stand in for
+            // the element an index named when exactly one element matches.
+            if (Bool(Get(sel, "unique"), false))
+            {
+                AutomationElementCollection all = win.FindAll(TreeScope.Descendants, cond);
+                if (all.Count == 0)
+                    throw new AxonError("element_not_found", "No element matched the selector.",
+                        "Take a snapshot to see what the window actually exposes.");
+                if (all.Count > 1)
+                    throw new AxonError("ambiguous_selector", all.Count + " elements match that name and role.",
+                        "Take a fresh snapshot and act on an index from it.");
+                return all[0];
+            }
             AutomationElement found = win.FindFirst(TreeScope.Descendants, cond);
             if (found == null)
                 throw new AxonError("element_not_found", "No element matched the selector.",
@@ -2740,41 +2796,71 @@ namespace Axon
             AutomationElement el = t.El;
             List<string> patterns = PatternsOf(el);
 
+            // A disabled control does nothing when clicked. Its pattern refuses
+            // (ElementNotEnabled), and falling through to a real click on it
+            // - what used to happen - pressed nothing, took the foreground from
+            // the user, and came back as "clicked via physical": on 2026-09-26
+            // a form's Next button, disabled until the form was valid, went
+            // exactly that way. physical:true still sends a real click.
+            if (!forcePhysical)
+            {
+                bool enabled = true;
+                try { enabled = el.Current.IsEnabled; } catch { }
+                if (!enabled)
+                    throw new AxonError("element_disabled",
+                        DescribeEl(el) + " is disabled, so clicking it would do nothing.",
+                        "Wait for it to become enabled (computer_wait_for, or read the window again once the form is complete), then click it. physical:true sends a real click anyway.");
+            }
+
+            // What a click on this control is expected to change - a check
+            // mark, a selection, an expansion - read before the click so the
+            // state reported after it is the new one or is said to be unconfirmed.
+            bool single = button == "left" && clicks == 1;
+            ClickState before = single ? ReadClickState(el, patterns) : null;
+
             // Pattern invoke is the fast deterministic path: no cursor movement,
             // no dependence on the window being unobscured or on top.
-            if (!forcePhysical && button == "left" && clicks == 1)
+            if (!forcePhysical && single)
             {
+                string tried = null;
                 try
                 {
                     if (Has(patterns, "Invoke"))
                     {
+                        tried = "Invoke";
                         InvokePattern p = el.GetCurrentPattern(InvokePattern.Pattern) as InvokePattern;
                         if (p != null)
                         {
                             Trace(el, "click", HwndArg(a));
                             InvokePattern ip = p;
                             bool? msaa = MsaaPress(el);
-                            if (msaa == null) { if (!RunPattern(delegate { ip.Invoke(); })) res["slow_provider"] = true; }
+                            bool done;
+                            if (msaa == null) done = RunPattern(delegate { ip.Invoke(); });
                             else
                             {
+                                done = msaa.Value;
                                 res["via"] = "msaa_default_action";
-                                if (msaa == false) res["slow_provider"] = true;
                             }
+                            if (!done) res["slow_provider"] = true;
                             res["method"] = "invoke_pattern";
-                            AddNowState(res, el);
+                            // A provider that did not answer in time is not asked
+                            // anything else on this thread.
+                            if (done)
+                            {
+                                if (!AwaitClickState(el, patterns, before, SettleMs)) res["state_unconfirmed"] = true;
+                                AddNowState(res, el);
+                            }
                             return res;
                         }
                     }
                     if (Has(patterns, "Toggle"))
                     {
+                        tried = "Toggle";
                         TogglePattern p = el.GetCurrentPattern(TogglePattern.Pattern) as TogglePattern;
                         if (p != null)
                         {
                             Trace(el, "toggle", HwndArg(a));
                             TogglePattern tp2 = p;
-                            ToggleState was = ToggleState.Indeterminate;
-                            bool knewState = false;
-                            try { was = p.Current.ToggleState; knewState = true; } catch { }
                             bool? msaa = MsaaPress(el);
                             bool done;
                             if (msaa == null) done = RunPattern(delegate { tp2.Toggle(); });
@@ -2782,54 +2868,69 @@ namespace Axon
                             {
                                 done = msaa.Value;
                                 res["via"] = "msaa_default_action";
-                                // A native check box may take the press as a
-                                // posted click; give its state a moment to move
-                                // so the reported state is the new one.
-                                for (int i = 0; done && knewState && i < 10; i++)
-                                {
-                                    try { if (p.Current.ToggleState != was) break; } catch { break; }
-                                    System.Threading.Thread.Sleep(30);
-                                }
                             }
                             res["method"] = "toggle_pattern";
-                            // A provider that did not answer the toggle in time is
-                            // not asked anything else on this thread.
                             if (!done) res["slow_provider"] = true;
-                            else { try { res["toggle"] = p.Current.ToggleState.ToString(); } catch { } }
+                            else
+                            {
+                                // A browser applies the toggle to the page first and
+                                // to its accessibility tree a beat later, and a native
+                                // check box may take the press as a posted click;
+                                // either way the state read at once is the old one.
+                                if (!AwaitClickState(el, patterns, before, SettleMs)) res["state_unconfirmed"] = true;
+                                try { res["toggle"] = p.Current.ToggleState.ToString(); } catch { }
+                            }
                             return res;
                         }
                     }
                     if (Has(patterns, "SelectionItem"))
                     {
+                        tried = "SelectionItem";
                         SelectionItemPattern p = el.GetCurrentPattern(SelectionItemPattern.Pattern) as SelectionItemPattern;
                         if (p != null)
                         {
                             Trace(el, "select", HwndArg(a));
                             SelectionItemPattern sp2 = p;
-                            if (!RunPattern(delegate { sp2.Select(); })) res["slow_provider"] = true;
+                            bool done = RunPattern(delegate { sp2.Select(); });
+                            if (!done) res["slow_provider"] = true;
                             res["method"] = "selection_pattern";
-                            AddNowState(res, el);
+                            if (done)
+                            {
+                                if (!AwaitClickState(el, patterns, before, SettleMs)) res["state_unconfirmed"] = true;
+                                AddNowState(res, el);
+                            }
                             return res;
                         }
                     }
                     if (Has(patterns, "ExpandCollapse"))
                     {
+                        tried = "ExpandCollapse";
                         ExpandCollapsePattern p = el.GetCurrentPattern(ExpandCollapsePattern.Pattern) as ExpandCollapsePattern;
                         if (p != null)
                         {
                             ExpandCollapsePattern ep2 = p;
-                            bool collapsed = false;
-                            try { collapsed = p.Current.ExpandCollapseState == ExpandCollapseState.Collapsed; } catch { }
+                            bool collapsed = before != null && before.Expand == "Collapsed";
                             bool done = RunPattern(delegate { if (collapsed) ep2.Expand(); else ep2.Collapse(); });
                             res["method"] = "expand_collapse_pattern";
                             if (!done) res["slow_provider"] = true;
-                            else { try { res["state"] = p.Current.ExpandCollapseState.ToString(); } catch { } }
+                            else
+                            {
+                                if (!AwaitClickState(el, patterns, before, SettleMs)) res["state_unconfirmed"] = true;
+                                try { res["state"] = p.Current.ExpandCollapseState.ToString(); } catch { }
+                            }
                             return res;
                         }
                     }
                 }
                 catch (AxonError) { throw; }
-                catch { /* fall through to the physical path */ }
+                catch (Exception ex)
+                {
+                    // Fall through to the physical path, and say why: a real
+                    // click the caller did not ask for should never be a mystery.
+                    Exception root = ex;
+                    if (root is System.Reflection.TargetInvocationException && root.InnerException != null) root = root.InnerException;
+                    res["pattern_error"] = (tried ?? "pattern") + " failed: " + root.GetType().Name;
+                }
             }
 
             if (Bool(Get(a, "background"), false))
@@ -2861,8 +2962,102 @@ namespace Axon
             res["method"] = "physical";
             res["point"] = point;
             System.Threading.Thread.Sleep(60);
+            if (!AwaitClickState(el, patterns, before, SettleMs)) res["state_unconfirmed"] = true;
             AddNowState(res, el);
             return res;
+        }
+
+        // ---- what a click is expected to change -----------------------------
+        //
+        // A browser applies a click to the page first and to its accessibility
+        // tree a moment later, so a state read straight after the pattern call
+        // is the state from before it: on 2026-09-26 four web check boxes were
+        // reported "now Off" and were On, and an expand button "now Collapsed"
+        // that had expanded. The click path reads the state the click should
+        // move, then gives it up to SettleMs to move; if it has not, the result
+        // says the state is unconfirmed instead of passing the old one off as new.
+        const int SettleMs = 700;
+
+        class ClickState
+        {
+            public string Toggle;
+            public bool? Selected;
+            public string Expand;
+        }
+
+        static ClickState ReadClickState(AutomationElement el, List<string> patterns)
+        {
+            ClickState s = new ClickState();
+            if (Has(patterns, "Toggle"))
+            {
+                try
+                {
+                    TogglePattern tp = el.GetCurrentPattern(TogglePattern.Pattern) as TogglePattern;
+                    if (tp != null) s.Toggle = tp.Current.ToggleState.ToString();
+                }
+                catch { }
+            }
+            if (Has(patterns, "SelectionItem"))
+            {
+                try
+                {
+                    SelectionItemPattern sp = el.GetCurrentPattern(SelectionItemPattern.Pattern) as SelectionItemPattern;
+                    if (sp != null) s.Selected = sp.Current.IsSelected;
+                }
+                catch { }
+            }
+            if (Has(patterns, "ExpandCollapse"))
+            {
+                try
+                {
+                    ExpandCollapsePattern ep = el.GetCurrentPattern(ExpandCollapsePattern.Pattern) as ExpandCollapsePattern;
+                    if (ep != null)
+                    {
+                        // A leaf never expands, whatever is clicked.
+                        string e = ep.Current.ExpandCollapseState.ToString();
+                        if (e != "LeafNode") s.Expand = e;
+                    }
+                }
+                catch { }
+            }
+            return s;
+        }
+
+        // A toggle always moves when clicked; a selection only when it was not
+        // already selected; an expansion flips.
+        static bool ExpectsChange(ClickState b)
+        {
+            return b != null && (b.Toggle != null || b.Selected == false || b.Expand != null);
+        }
+
+        static bool MovedFrom(ClickState b, ClickState n)
+        {
+            if (b.Toggle != null && n.Toggle != null && n.Toggle != b.Toggle) return true;
+            if (b.Selected == false && n.Selected == true) return true;
+            if (b.Expand != null && n.Expand != null && n.Expand != b.Expand) return true;
+            return false;
+        }
+
+        // True once the state has moved, or when nothing was expected to move;
+        // false when it had not moved after maxMs.
+        static bool AwaitClickState(AutomationElement el, List<string> patterns, ClickState before, int maxMs)
+        {
+            if (!ExpectsChange(before)) return true;
+            System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+            while (true)
+            {
+                ClickState now = ReadClickState(el, patterns);
+                if (MovedFrom(before, now)) return true;
+                if (sw.ElapsedMilliseconds >= maxMs) return false;
+                System.Threading.Thread.Sleep(40);
+            }
+        }
+
+        static string DescribeEl(AutomationElement el)
+        {
+            string role = RoleOf(el);
+            string name = CleanText(NameOf(el));
+            return name != null ? role + " \"" + (name.Length > 60 ? name.Substring(0, 60) + "..." : name) + "\"" : role;
         }
 
         static object OpSetValue(Dictionary<string, object> a)
@@ -3093,6 +3288,23 @@ namespace Axon
                 Target t = ResolveTarget(a);
                 AutomationElement el = t.El;
                 List<string> patterns = PatternsOf(el);
+                // Bring this element into view, the way a screen reader does:
+                // its container scrolls, and nothing touches the pointer.
+                if (Bool(Get(a, "into_view"), false))
+                {
+                    ScrollItemPattern sip = null;
+                    if (Has(patterns, "ScrollItem"))
+                    {
+                        try { sip = el.GetCurrentPattern(ScrollItemPattern.Pattern) as ScrollItemPattern; } catch { }
+                    }
+                    if (sip == null)
+                        throw new AxonError("no_scroll_item", DescribeEl(el) + " cannot scroll itself into view (it has no ScrollItem pattern).",
+                            "Scroll its container by amount instead.");
+                    ScrollItemPattern sip2 = sip;
+                    if (!RunPattern(delegate { sip2.ScrollIntoView(); })) res["slow_provider"] = true;
+                    res["method"] = "scroll_into_view";
+                    return res;
+                }
                 if (Has(patterns, "Scroll"))
                 {
                     try
@@ -3100,17 +3312,27 @@ namespace Axon
                         ScrollPattern p = el.GetCurrentPattern(ScrollPattern.Pattern) as ScrollPattern;
                         if (p != null)
                         {
-                            bool big = Math.Abs(amount) >= 3;
-                            ScrollAmount unit;
-                            if (amount < 0) unit = big ? ScrollAmount.LargeIncrement : ScrollAmount.SmallIncrement;
-                            else unit = big ? ScrollAmount.LargeDecrement : ScrollAmount.SmallDecrement;
-                            if (horizontal) p.Scroll(unit, ScrollAmount.NoAmount);
-                            else p.Scroll(ScrollAmount.NoAmount, unit);
+                            ScrollBy(p, amount, horizontal);
                             res["method"] = "scroll_pattern";
                             return res;
                         }
                     }
                     catch { }
+                }
+                // Most controls cannot scroll; the list, pane or page they sit
+                // in can, through its own pattern, with no pointer and no
+                // foreground. The mouse wheel is only for when nothing can: it
+                // needs the cursor, and so it waits for, or refuses on, a user
+                // who is moving the mouse.
+                {
+                    string how;
+                    AutomationElement box = ScrollableAncestor(el, amount, horizontal, out how);
+                    if (box != null)
+                    {
+                        res["method"] = "scroll_pattern";
+                        res["container"] = how;
+                        return res;
+                    }
                 }
                 // No clickable point means no place to scroll: sending the wheel
                 // anyway would scroll whatever sits under the user's pointer.
@@ -3180,6 +3402,56 @@ namespace Axon
                 res["cursor_restored"] = true;
             }
             return res;
+        }
+
+        // One scroll step through the pattern: a page for |amount| of 3 or
+        // more, a line below that; negative is down (or right).
+        static void ScrollBy(ScrollPattern p, int amount, bool horizontal)
+        {
+            bool big = Math.Abs(amount) >= 3;
+            ScrollAmount unit;
+            if (amount < 0) unit = big ? ScrollAmount.LargeIncrement : ScrollAmount.SmallIncrement;
+            else unit = big ? ScrollAmount.LargeDecrement : ScrollAmount.SmallDecrement;
+            if (horizontal) p.Scroll(unit, ScrollAmount.NoAmount);
+            else p.Scroll(ScrollAmount.NoAmount, unit);
+        }
+
+        // The nearest ancestor that can scroll in that direction, scrolled.
+        // Returns it (with a description in how), or null when none could.
+        static AutomationElement ScrollableAncestor(AutomationElement el, int amount, bool horizontal, out string how)
+        {
+            how = null;
+            try
+            {
+                TreeWalker w = TreeWalker.ControlViewWalker;
+                AutomationElement cur = w.GetParent(el);
+                for (int i = 0; i < 40 && cur != null; i++)
+                {
+                    bool can = false;
+                    try { can = (bool)cur.GetCurrentPropertyValue(AutomationElement.IsScrollPatternAvailableProperty); } catch { }
+                    if (can)
+                    {
+                        try
+                        {
+                            ScrollPattern p = cur.GetCurrentPattern(ScrollPattern.Pattern) as ScrollPattern;
+                            if (p != null && (horizontal ? p.Current.HorizontallyScrollable : p.Current.VerticallyScrollable))
+                            {
+                                ScrollBy(p, amount, horizontal);
+                                how = DescribeEl(cur);
+                                return cur;
+                            }
+                        }
+                        catch { }
+                    }
+                    // The window itself is as far as a page's scroll container goes.
+                    int h = 0;
+                    try { h = cur.Current.NativeWindowHandle; } catch { }
+                    if (h != 0 && Native.GetAncestor(new IntPtr(h), 2 /* GA_ROOT */) == new IntPtr(h)) break;
+                    cur = w.GetParent(cur);
+                }
+            }
+            catch { }
+            return null;
         }
 
         static object OpFocus(Dictionary<string, object> a)
@@ -4098,6 +4370,253 @@ namespace Axon
                     return true;
             }
             return false;
+        }
+
+        // ---- handing the foreground back -----------------------------------
+        //
+        // A real click activates the window it lands in, and keystrokes need
+        // their window in front, so some actions take the foreground from
+        // whatever the user was working in. Putting the pointer back was never
+        // enough: on 2026-09-26 a physical click on a browser on the user's
+        // second monitor left that browser in front, and the next thing they
+        // typed went into it instead of their terminal.
+        //
+        // So the window that was in front before the first such action in a
+        // sequence is remembered, and give_back - which the server calls when a
+        // run ends, or straight after a single action - puts it back. It does
+        // not when the user has since clicked somewhere themselves (their
+        // choice stands), when something unrelated is in front now, while a
+        // menu or dropdown the target opened is still showing (it would close
+        // the moment its app lost the foreground; the record is kept and the
+        // next give_back tries again), or when the action ran in take or
+        // exclusive mode, where the user has said to drive. computer_focus is
+        // not tracked at all: raising a window is what it was asked to do.
+        static IntPtr _fgHome = IntPtr.Zero;
+        static readonly HashSet<uint> _fgOurPids = new HashSet<uint>();
+        static long _fgBorrowTicks;
+        static long _fgLastActTicks;
+
+        static bool BorrowTracked(string op, Dictionary<string, object> a)
+        {
+            switch (op)
+            {
+                case "click": case "type": case "set_value": case "key": case "scroll":
+                case "drag": case "paste": case "paste_files": case "file_dialog":
+                    break;
+                default:
+                    return false;
+            }
+            string m = ModeOf(a);
+            return m != "take" && m != "exclusive";
+        }
+
+        static uint PidOf(IntPtr h)
+        {
+            uint pid = 0;
+            if (h != IntPtr.Zero) Native.GetWindowThreadProcessId(h, out pid);
+            return pid;
+        }
+
+        static void NoteBorrow(IntPtr fgBefore, Dictionary<string, object> a)
+        {
+            // A record left over from an earlier sequence - never given back
+            // (a menu was still open, or the server went away) - is not this
+            // sequence's home once the user has clicked since, or a minute has
+            // passed without an action.
+            if (_fgHome != IntPtr.Zero)
+            {
+                long idleMs = (DateTime.UtcNow.Ticks - _fgLastActTicks) / TimeSpan.TicksPerMillisecond;
+                if (Presence.LastUserClickTicks > _fgBorrowTicks || idleMs > 60000) ClearBorrow();
+            }
+            IntPtr fgAfter = Native.GetForegroundWindow();
+            if (_fgHome != IntPtr.Zero) _fgLastActTicks = DateTime.UtcNow.Ticks;
+            if (fgAfter == IntPtr.Zero || fgBefore == IntPtr.Zero || fgAfter == fgBefore) return;
+            if (Overlay.IsAnyOverlayWindow(fgBefore) || Overlay.IsAnyOverlayWindow(fgAfter)) return;
+            if (_fgHome == IntPtr.Zero)
+            {
+                _fgHome = fgBefore;
+                _fgOurPids.Clear();
+                _fgBorrowTicks = DateTime.UtcNow.Ticks;
+            }
+            _fgOurPids.Add(PidOf(fgAfter));
+            IntPtr target = HwndArg(a);
+            if (target != IntPtr.Zero) _fgOurPids.Add(PidOf(target));
+            _fgLastActTicks = DateTime.UtcNow.Ticks;
+        }
+
+        static void ClearBorrow()
+        {
+            _fgHome = IntPtr.Zero;
+            _fgOurPids.Clear();
+        }
+
+        // A menu, dropdown list or browser popup of one of these processes that
+        // is showing right now, by class; null when there is none.
+        static string OpenPopupOf(HashSet<uint> pids)
+        {
+            string found = null;
+            try
+            {
+                Native.EnumWindows(delegate(IntPtr h, IntPtr lp)
+                {
+                    if (!Native.IsWindowVisible(h) || Native.IsCloaked(h)) return true;
+                    System.Text.StringBuilder sb = new System.Text.StringBuilder(128);
+                    Native.GetClassName(h, sb, sb.Capacity);
+                    string cls = sb.ToString();
+                    // Chromium draws a <select> list as an owned, non-activating
+                    // WS_POPUP of the ordinary window class (measured in Edge:
+                    // Chrome_WidgetWin_1, style 0x96000000, exstyle 0x08200000),
+                    // not as one of the popup classes the window listing knows.
+                    bool transient = IsPopupClass(cls);
+                    if (!transient)
+                    {
+                        const int WS_POPUP = unchecked((int)0x80000000), WS_EX_NOACTIVATE = 0x08000000;
+                        transient = Native.GetWindowRel(h, 4 /* GW_OWNER */) != IntPtr.Zero
+                            && (Native.GetWindowLongW(h, -16 /* GWL_STYLE */) & WS_POPUP) != 0
+                            && (Native.GetWindowLongW(h, -20 /* GWL_EXSTYLE */) & WS_EX_NOACTIVATE) != 0;
+                    }
+                    if (!transient) return true;
+                    Native.RECT rr;
+                    if (!Native.GetWindowRect(h, out rr)) return true;
+                    int rw = rr.Right - rr.Left, rh = rr.Bottom - rr.Top;
+                    // Tooltips share a class with browser menus; height tells them
+                    // apart (a tooltip is one line, a list at least two).
+                    if (rw < 40 || rh < (cls == "Chrome_WidgetWin_2" ? 60 : IsPopupClass(cls) ? 24 : 40)) return true;
+                    if (!pids.Contains(PidOf(h))) return true;
+                    found = cls;
+                    return false;
+                }, IntPtr.Zero);
+            }
+            catch { }
+            return found;
+        }
+
+        static object OpGiveBack(Dictionary<string, object> a)
+        {
+            Dictionary<string, object> res = new Dictionary<string, object>();
+            IntPtr home = _fgHome;
+            res["given_back"] = false;
+            if (home == IntPtr.Zero) return res;
+            // A menu the last action opened may take a moment to appear; look
+            // for it only once it has had the chance.
+            long sinceMs = (DateTime.UtcNow.Ticks - _fgLastActTicks) / TimeSpan.TicksPerMillisecond;
+            if (sinceMs >= 0 && sinceMs < 250) System.Threading.Thread.Sleep((int)(250 - sinceMs));
+
+            IntPtr fg = Native.GetForegroundWindow();
+            string why = null;
+            if (!Native.IsWindow(home) || !Native.IsWindowVisible(home) || Native.IsIconic(home)) why = "home_gone";
+            else if (fg == home) why = "already_back";
+            else if (Presence.LastUserClickTicks > _fgBorrowTicks) why = "user_moved";
+            else if (fg != IntPtr.Zero && !_fgOurPids.Contains(PidOf(fg))) why = "user_moved";
+            if (why != null)
+            {
+                ClearBorrow();
+                res["reason"] = why;
+                return res;
+            }
+            string popup = OpenPopupOf(_fgOurPids);
+            if (popup != null)
+            {
+                res["reason"] = "menu_open";
+                res["popup"] = popup;
+                return res;
+            }
+            bool ok = Native.ForceForeground(home);
+            System.Text.StringBuilder t = new System.Text.StringBuilder(256);
+            Native.GetWindowTextW(home, t, t.Capacity);
+            res["given_back"] = ok;
+            res["hwnd"] = Hwnd(home);
+            res["title"] = t.ToString();
+            if (!ok) res["reason"] = "refused";
+            ClearBorrow();
+            return res;
+        }
+
+        // ---- which terminal shows this session ------------------------------
+        //
+        // Run as `AxonHost.exe --console-window <pid>`: a separate short-lived
+        // process, never the host itself, because it has to give up its own
+        // console to borrow another's. Starting at <pid> (the server's parent,
+        // Claude Code) and walking up its parents, it attaches to each one's
+        // console and asks for the console window. Windows Terminal owns the
+        // hidden pseudo-console window of each of its panes, so the root owner of
+        // that window is the terminal window the session is drawn in; a classic
+        // console window is itself visible. A process started without a console
+        // window answers nothing and the walk moves on to its parent. Prints
+        // {"hwnd":N,"via_pid":P}, hwnd 0 when nothing was found.
+        static int ConsoleWindowOf(string arg)
+        {
+            // Bound to the pipe before any console is touched.
+            System.IO.TextWriter outw = Console.Out;
+            outw.Flush();
+            int pid;
+            if (!int.TryParse(arg, NumberStyles.Integer, CultureInfo.InvariantCulture, out pid)) pid = 0;
+            long hwnd = 0;
+            int via = 0;
+            Dictionary<int, int> parents = ParentMap();
+            HashSet<int> seen = new HashSet<int>();
+            int cur = pid;
+            for (int depth = 0; depth < 8 && cur > 4 && seen.Add(cur); depth++)
+            {
+                try
+                {
+                    Native.FreeConsole();
+                    if (Native.AttachConsole((uint)cur))
+                    {
+                        IntPtr cw = Native.GetConsoleWindow();
+                        Native.FreeConsole();
+                        if (cw != IntPtr.Zero)
+                        {
+                            IntPtr owner = Native.GetAncestor(cw, 3 /* GA_ROOTOWNER */);
+                            IntPtr pick = IntPtr.Zero;
+                            if (owner != IntPtr.Zero && owner != cw && Native.IsWindowVisible(owner)) pick = owner;
+                            else if (Native.IsWindowVisible(cw)) pick = cw;
+                            if (pick != IntPtr.Zero) { hwnd = Hwnd(pick); via = cur; break; }
+                        }
+                    }
+                }
+                catch { }
+                int pp;
+                if (!parents.TryGetValue(cur, out pp) || pp <= 4) break;
+                // A parent id Windows has since given to a younger process is not
+                // this process's parent any more.
+                if (!StartedBefore(pp, cur)) break;
+                cur = pp;
+            }
+            outw.WriteLine("{\"hwnd\":" + hwnd.ToString(CultureInfo.InvariantCulture) + ",\"via_pid\":" + via.ToString(CultureInfo.InvariantCulture) + "}");
+            outw.Flush();
+            return 0;
+        }
+
+        static Dictionary<int, int> ParentMap()
+        {
+            Dictionary<int, int> map = new Dictionary<int, int>();
+            IntPtr snap = Native.CreateToolhelp32Snapshot(2 /* TH32CS_SNAPPROCESS */, 0);
+            if (snap == IntPtr.Zero || snap == new IntPtr(-1)) return map;
+            try
+            {
+                Native.PROCESSENTRY32W e = new Native.PROCESSENTRY32W();
+                e.dwSize = (uint)Marshal.SizeOf(typeof(Native.PROCESSENTRY32W));
+                if (Native.Process32FirstW(snap, ref e))
+                {
+                    do { map[(int)e.th32ProcessID] = (int)e.th32ParentProcessID; }
+                    while (Native.Process32NextW(snap, ref e));
+                }
+            }
+            finally { Native.CloseHandle(snap); }
+            return map;
+        }
+
+        static bool StartedBefore(int parent, int child)
+        {
+            try
+            {
+                DateTime p = System.Diagnostics.Process.GetProcessById(parent).StartTime;
+                DateTime c = System.Diagnostics.Process.GetProcessById(child).StartTime;
+                return p <= c;
+            }
+            catch (ArgumentException) { return false; }   // the parent is gone
+            catch { return true; }                        // not ours to inspect: assume it is the parent
         }
 
         static object OpPing()

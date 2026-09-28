@@ -17,12 +17,14 @@ const suites = [
   'policy-test.mjs',
   'sessions-test.mjs',
   'astra-test.mjs',
+  'fixes-test.mjs',
   'build-test.mjs',
   'verify.mjs',
   'presence-test.mjs',
   'host-test.mjs',
   'mcp-test.mjs',
   'batch-test.mjs',
+  'web-test.mjs',
 ];
 
 async function sweepStrayWindows() {

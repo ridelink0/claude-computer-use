@@ -13,7 +13,8 @@ import { fileURLToPath } from 'node:url';
 import { Driver, HostError } from './driver.mjs';
 import { dataDir } from './build.mjs';
 import { Policy, classify, isConsequential, isHandOff, desktopLocked, TIER, looksLikeShellName, shellKeyReason } from './policy.mjs';
-import { renderSnapshot, renderApps, buildRows, renderDelta, diffRows, subtreeNodes, findMatcher, nodeMatches, leanNodes, probeWarning, blindTreeNote } from './render.mjs';
+import { renderSnapshot, renderApps, buildRows, renderDelta, diffRows, subtreeNodes, findMatcher, nodeMatches, leanNodes, probeWarning, blindTreeNote, excludeSubtrees } from './render.mjs';
+import { ensureHost } from './build.mjs';
 import { profileHint } from './profiles.mjs';
 import { Sessions, LeaseBusy } from './sessions.mjs';
 import { Tasks, validateSteps, HALT_TURN } from './tasks.mjs';
@@ -51,7 +52,29 @@ const INSTRUCTIONS = [
 // Other Claude Code sessions driving this same desktop. Registered before the
 // host starts, so the banner knows which slot it owns and never lands on top of
 // another session's Stop button.
-const sessions = new Sessions();
+// Which Claude Code session this server serves. Claude Code passes it to a
+// stdio server as CLAUDE_CODE_SESSION_ID; failing that, its own registry file
+// for the process that started this server names it; failing both, the first
+// Stop hook does. A resumed conversation keeps its id, so this is what carries
+// its grants across the new server process and names the old one correctly.
+function claudeSessionOf(pid) {
+  try {
+    const dir = process.env.CLAUDE_CONFIG_DIR || path.join(process.env.USERPROFILE || process.env.HOME || '', '.claude');
+    const rec = JSON.parse(fs.readFileSync(path.join(dir, 'sessions', `${pid}.json`), 'utf8'));
+    return rec && rec.sessionId ? String(rec.sessionId) : null;
+  } catch { return null; }
+}
+// Claude Code's registry for the parent process is the authority. The
+// environment variable counts only when this server was not started from a
+// Claude Code shell: Claude Code strips CLAUDE_CODE_CHILD_SESSION from an MCP
+// server's environment and sets it for everything its Bash tool runs, so a
+// test harness run from a session does not pick up that session's grants.
+const SESSION_ID = claudeSessionOf(process.ppid)
+  || (process.env.CLAUDE_CODE_CHILD_SESSION === '1' ? '' : String(process.env.CLAUDE_CODE_SESSION_ID || '').trim())
+  || null;
+const grantsFile = (id) => (id ? path.join(dataDir(), 'sessions', `grants-${String(id).replace(/[^A-Za-z0-9_-]/g, '')}.json`) : null);
+
+const sessions = new Sessions({ sessionId: SESSION_ID });
 sessions.register();
 
 const driver = new Driver({
@@ -62,9 +85,45 @@ const driver = new Driver({
   },
   onEvent: (m) => hostEvent(m),
 });
-const policy = new Policy();
+const policy = new Policy({ store: grantsFile(SESSION_ID) });
 policy.markSelf([process.pid, process.ppid]);
+// Grants an earlier process of this conversation made, said once on the next
+// result. On 2026-09-26 a resumed conversation found every grant gone.
+let restoredGrants = policy.restore();
 const tasks = new Tasks();
+
+// The terminal window this session is drawn in. Claude Code's own process
+// owns no window - Windows Terminal draws it - so marking the parent pid never
+// excluded it, and computer_apps listed the session's own terminal. The host
+// binary, run once as a helper, finds it through the console (ConsoleWindowOf).
+let selfWindowFound = null;
+function findSelfWindow() {
+  if (selfWindowFound) return selfWindowFound;
+  selfWindowFound = new Promise((resolve) => {
+    if (process.platform !== 'win32') { resolve(0); return; }
+    let exe;
+    try { exe = ensureHost({ log: () => {} }).exe; } catch { resolve(0); return; }
+    let out = '';
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      let hwnd = 0;
+      try { hwnd = Number(JSON.parse(out.trim().split('\n').pop() || '{}').hwnd) || 0; } catch { /* nothing found */ }
+      if (hwnd) policy.markSelfWindow(hwnd);
+      resolve(hwnd);
+    };
+    try {
+      const p = spawn(exe, ['--console-window', String(process.ppid)], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+      p.stdout.on('data', (d) => { out += d; });
+      p.on('error', finish);
+      p.on('close', finish);
+      // Its own child, stopped if it has not answered in time.
+      setTimeout(() => { if (!done) { try { p.kill(); } catch { /* gone */ } finish(); } }, 5000).unref();
+    } catch { finish(); }
+  });
+  return selfWindowFound;
+}
 
 // Notes across context windows: one line per call, in the shared data dir,
 // handed back by computer_recap and by the SessionStart hook after a
@@ -236,7 +295,7 @@ const SELECTOR = {
 const MODE = {
   type: 'string',
   enum: ['share', 'yield', 'take', 'exclusive'],
-  description: 'Behaviour while the user is active. Default share. exclusive also holds their mouse and keyboard for the length of each action; Esc always releases it.',
+  description: 'While the user is active. Default share; exclusive also holds their mouse and keyboard during each action (Esc releases).',
 };
 
 const TARGET = {
@@ -246,7 +305,7 @@ const TARGET = {
   selector: SELECTOR,
   point: { type: 'array', items: int, description: 'Absolute [x,y]. Last resort.' },
   hwnd: int,
-  background: { type: 'boolean', description: 'Post the input straight to the window without focus, cursor or raising it. Automatic for type when the window is not in front.' },
+  background: { type: 'boolean', description: 'Post input to the window without focus, cursor or raising it. Automatic for type into a window behind.' },
 };
 
 const TOOLS = [
@@ -269,13 +328,14 @@ const TOOLS = [
       hwnd: int, title: str,
       interactive_only: { type: 'boolean', description: 'Actionable elements only. Smaller.' },
       index: { type: 'integer', description: 'Only the subtree under this index.' },
-      find: { type: 'string', description: 'Only rows whose name, text, id or role match this text or /regex/.' },
+      find: { type: 'string', description: 'Only rows matching this text or /regex/ in a field or the printed row (e.g. /Button "Next/).' },
+      exclude: { type: 'array', items: int, description: 'Leave out these indices and their subtrees (a sidebar).' },
       full: { type: 'boolean', description: 'Whole listing instead of the changes since the last read.' },
       max_nodes: int, max_depth: int,
       chrome: { type: 'boolean', description: 'Browsers: also list toolbar and sidebar controls.' },
       text_limit: { type: 'integer', description: 'Chars of element text to show. Default 200.' },
       with_rects: { type: 'boolean', description: 'Include bounding boxes. Only needed for point targeting.' },
-      with_image: { type: 'boolean', description: 'Hybrid read: tree PLUS a picture of the same window, the way Codex sees. For visual/canvas checks. Costs ~15x the tree.' },
+      with_image: { type: 'boolean', description: 'Tree plus a picture of the window, for visual or canvas checks. Costs ~15x the tree.' },
     } },
   },
   {
@@ -320,8 +380,8 @@ const TOOLS = [
   },
   {
     name: 'computer_scroll',
-    description: 'Scroll an element or the cursor point. Negative is down. Scroll-then-read-then-click belongs in one computer_run call.',
-    inputSchema: { type: 'object', properties: { ...TARGET, amount: int, horizontal: bool } },
+    description: 'Scroll an element or its container, or a point. Negative is down; into_view:true brings the element into view. Scroll-then-read-then-click belongs in one computer_run call.',
+    inputSchema: { type: 'object', properties: { ...TARGET, amount: int, horizontal: bool, into_view: bool } },
   },
   {
     name: 'computer_drag',
@@ -346,7 +406,7 @@ const TOOLS = [
   },
   {
     name: 'computer_run',
-    description: 'The normal way to act: a batch of steps in ONE call - click, type, paste, key, scroll, wait_for, snapshot, sleep, focus, drag - run in order, stopping at the first failure, ending with what changed. Use it for every sequence you can already name, e.g. steps: [{key:"ctrl+l"}, {type:"https://..."}, {key:"enter"}, {wait_for:{change:true}}]. A step may add hwnd, title or window:"new" to act on another window, optional:true to survive a failure, repeat:N to repeat. Steps pass the same gate a single call would.',
+    description: 'The normal way to act: a batch of steps in ONE call - click, type, paste, key, scroll, wait_for, snapshot, sleep, focus, drag - run in order, stopping at the first failure, ending with what changed. Use it for every sequence you can already name, e.g. steps: [{key:"ctrl+l"}, {type:"https://..."}, {key:"enter"}, {wait_for:{change:true}}]. A step may add hwnd, title or window:"new" to act on another window, optional:true to survive a failure, repeat:N to repeat, timeout_ms for a wait_for (default 5000). Steps pass the same gate a single call would.',
     inputSchema: { type: 'object', required: ['steps'], properties: {
       hwnd: int, title: str,
       steps: { type: 'array', items: { type: 'object' } },
@@ -428,6 +488,7 @@ let windowCache = new Map();
 let windowCacheAt = 0;
 
 async function listWindows({ includeHidden = false, fresh = false } = {}) {
+  await findSelfWindow();
   if (!fresh && Date.now() - windowCacheAt < 1500 && windowCache.size) {
     return [...windowCache.values()];
   }
@@ -701,9 +762,15 @@ let waitSeq = 0;
 // the host always returns the whole tree: a wait for change then compares
 // whole trees whatever filter the last read showed, and a lean read is given
 // more room because the filter comes after the walk.
+// max_nodes is a cap on the rows SHOWN (renderSnapshot applies it after the
+// filters). Passed to the host as a walk limit it cut a browser read off
+// inside the toolbar - the browser's own controls come first in tree order -
+// so a find, or a controls-only read, never reached the page. The host is
+// only ever given a larger walk than its default, never a smaller one.
 function readArgsOf(args) {
+  const asked = Number(args.max_nodes) || 0;
   return {
-    max_nodes: args.max_nodes || (args.interactive_only ? 2500 : undefined),
+    max_nodes: asked ? Math.max(asked, 2500) : (args.interactive_only || args.find ? 2500 : undefined),
     max_depth: args.max_depth || undefined,
   };
 }
@@ -718,7 +785,35 @@ function viewArgsOf(args) {
     text_limit: args.text_limit || undefined,
     with_rects: !!args.with_rects || undefined,
     chrome: !!args.chrome || undefined,
+    exclude: excludeOf(args).length ? excludeOf(args) : undefined,
   };
+}
+
+function excludeOf(args) {
+  const e = args.exclude;
+  if (e == null) return [];
+  return (Array.isArray(e) ? e : [e]).map(Number).filter((n) => Number.isInteger(n) && n >= 0);
+}
+
+// The latest tree seen of each window - from any read, a find, a subtree read,
+// a run's closing read or a wait that saw a change - as rows built the one way
+// a wait for change builds them. That wait compares against this. It used to
+// compare against the last full listing only, which on 2026-09-26 was a read
+// from many actions earlier, taken with max_nodes 60, so its "change" was the
+// browser toolbar, cut short.
+const lastTree = new Map();
+// When each window was last acted on, so a run can tell whether the latest
+// tree predates its own previous action.
+const lastActAt = new Map();
+
+function rememberTree(hwnd, result) {
+  lastTree.set(Number(hwnd), {
+    sid: result.snapshot_id,
+    rows: buildRows(result, {}).rows,
+    at: Date.now(),
+    partial: !!(result.truncated || result.time_budget_ms),
+  });
+  while (lastTree.size > 16) lastTree.delete(lastTree.keys().next().value);
 }
 
 function renderOptsOf(args) {
@@ -874,6 +969,10 @@ const handlers = {
           ? 'Computer Use can read this window but never types into it. Use the Bash tool for shell work.'
           : 'This is not configurable.');
     }
+    if (res.slashOnly) {
+      return text(`granted SLASH COMMANDS ONLY in this Claude Code terminal "${win.title}" (hwnd ${win.hwnd}), because this install turned allow_claude_slash_commands on. ` +
+        'computer_type one line such as "/compact" (no target, no replace), then computer_key "enter" within 20 s. Anything else sent to this terminal is refused.');
+    }
     let msg = `granted input to "${app}" for this session (tier: ${res.tier}).`;
     if (res.reason) msg += `\n\ncaution: ${res.reason}`;
     const hint = profileHint(win);
@@ -890,18 +989,20 @@ const handlers = {
     if (elsewhere) return elsewhere;
 
     const hwnd = Number(win.hwnd);
-    const call = await driver.call('snapshot', { hwnd, ...readArgsOf(args) });
-    const { result } = call;
+    let call = await driver.call('snapshot', { hwnd, ...readArgsOf(args) });
+    let { result } = call;
     budget.snapshots++;
     lastSnapshotId = result.snapshot_id;
     trackSnapshot(result.snapshot_id, hwnd, result.nodes);
 
-    const opts = { ...renderOptsOf(args), ms: call.ms };
+    const opts = { ...renderOptsOf(args), ms: call.ms, maxRows: Number(args.max_nodes) || null };
+    const exclude = excludeOf(args);
+    const nodesOf = (r) => excludeSubtrees(r.nodes, exclude);
     let body;
     // The rows this read shows, for the safety monitor below.
     let shownRows = [];
     if (args.index != null) {
-      const sub = subtreeNodes(result.nodes, args.index);
+      const sub = subtreeNodes(nodesOf(result), args.index);
       if (!sub) {
         return fail('index_out_of_range', `No element [${args.index}] in "${win.title}".`,
           'Take a snapshot of the window to see its current indices.');
@@ -910,12 +1011,31 @@ const handlers = {
       shownRows = buildRows(result, { ...opts, nodes: sub }).rows;
     } else if (args.find) {
       const matcher = findMatcher(args.find);
-      const hits = (result.nodes || []).filter((n) => nodeMatches(n, matcher));
-      body = renderSnapshot(result, { ...opts, nodes: hits, scope: `find ${JSON.stringify(String(args.find))} in ${(result.nodes || []).length} elements`, lean: true });
-      if (!hits.length) body += '\n(no element matches; try a shorter word, or read the window without find)';
+      let hits = nodesOf(result).filter((n) => nodeMatches(n, matcher));
+      // Nothing found straight after a navigation is often a page that has
+      // not drawn yet: the same find a second later found it. Up to three
+      // more reads, 400 ms apart, before answering "no match" - and if the
+      // tree was still changing, that is said rather than "no match".
+      let settling = '';
+      if (!hits.length) {
+        const counts = [(result.nodes || []).length];
+        for (let k = 0; k < 3 && !hits.length; k++) {
+          await sleep(400);
+          call = await driver.call('snapshot', { hwnd, ...readArgsOf(args) });
+          result = call.result;
+          lastSnapshotId = result.snapshot_id;
+          trackSnapshot(result.snapshot_id, hwnd, result.nodes);
+          counts.push((result.nodes || []).length);
+          hits = nodesOf(result).filter((n) => nodeMatches(n, matcher));
+        }
+        if (hits.length) settling = 'found after the page settled';
+        else if (new Set(counts).size > 1) settling = `the tree was still changing (${counts.join(' -> ')} elements): the page may still be loading - try again`;
+      }
+      body = renderSnapshot(result, { ...opts, ms: call.ms, nodes: hits, scope: `find ${JSON.stringify(String(args.find))} in ${(result.nodes || []).length} elements`, lean: true, note: hits.length ? settling : '' });
+      if (!hits.length) body += settling ? `\n(no element matches yet; ${settling})` : '\n(no element matches; try a shorter word, or read the window without find)';
       shownRows = buildRows(result, { ...opts, nodes: hits }).rows;
     } else {
-      const view = args.interactive_only ? leanNodes(result.nodes) : result.nodes;
+      const view = args.interactive_only ? leanNodes(nodesOf(result)) : nodesOf(result);
       const built = buildRows(result, { ...opts, nodes: view });
       shownRows = built.rows;
       const fullRows = args.interactive_only ? buildRows(result, opts).rows : built.rows;
@@ -941,6 +1061,7 @@ const handlers = {
     // once; repeating them on every read cost more than the read.
     // ...and the safety monitor: rows that read like instructions to an agent
     // are named once, in front, as the page data they are.
+    rememberTree(hwnd, result);
     const blind = blindTreeNote(result);
     body = presenceNote(await presence()) + injectionBanner(win) + blind + probeWarning(shownRows) + body;
     bannerStatus('reading ' + appWord(win));
@@ -1172,7 +1293,7 @@ const handlers = {
     }
     return act('key', args, (r) => `sent ${r.sent}.`);
   },
-  async computer_scroll(args) { return act('scroll', args, (r) => `scrolled via ${r.method}.`); },
+  async computer_scroll(args) { return act('scroll', args, (r) => `scrolled via ${r.method}${r.container ? ` of ${r.container}` : ''}.`); },
 
   async computer_type(args) {
     if (args.replace) {
@@ -1312,13 +1433,20 @@ const handlers = {
       // The comparison is against the whole tree as of the last read, so a
       // change in a label is seen even when that read showed controls only.
       const prev = lastRead.get(hwnd);
-      let baseRows, since, hostArgs, opts;
-      if (prev) {
-        baseRows = prev.fullRows; since = prev.sid; hostArgs = readArgsOf(prev.args); opts = prev.opts;
+      // Against the latest tree seen of this window, read whole: the view a
+      // read happened to use (max_nodes, controls only) has nothing to do with
+      // what counts as a change. A tree that was cut short is no baseline -
+      // every row it missed would come back as "added" - so then, as with no
+      // read at all, the baseline is now.
+      const hostArgs = {};
+      const opts = {};
+      let baseRows, since;
+      const tree = lastTree.get(hwnd);
+      if (tree && !tree.partial) {
+        baseRows = tree.rows; since = tree.sid;
       } else {
-        // Nothing has been read yet, so the baseline is now.
-        hostArgs = {}; opts = {};
         const base = await pollTree(hwnd, hostArgs);
+        rememberTree(hwnd, base);
         baseRows = buildRows(base, opts).rows; since = 'the start of this wait';
       }
       while (Date.now() < deadline) {
@@ -1343,15 +1471,20 @@ const handlers = {
         if (moved) {
           const now = Date.now();
           if (!delta) delta = renderSnapshot(cur, { ...opts, nodes: leanNodes(cur.nodes), lean: true, ms: waited() });
-          const lean = prev && prev.args.interactive_only;
+          // The next read of this window continues from here, in the view it
+          // was using: its delta would otherwise repeat this one.
+          const pOpts = prev ? prev.opts : {};
+          let pNodes = excludeSubtrees(cur.nodes, prev ? excludeOf(prev.args) : []);
+          if (prev && prev.args.interactive_only) pNodes = leanNodes(pNodes);
           remember(hwnd, {
             sid: cur.snapshot_id,
-            rows: lean ? buildRows(cur, { ...opts, nodes: leanNodes(cur.nodes) }).rows : built.rows,
-            fullRows: built.rows,
+            rows: buildRows(cur, { ...pOpts, nodes: pNodes }).rows,
+            fullRows: buildRows(cur, pOpts).rows,
             sig: prev ? prev.sig : readSig({}),
             args: prev ? prev.args : viewArgsOf({}),
-            opts, at: now, fullAt: prev ? prev.fullAt : now,
+            opts: pOpts, at: now, fullAt: prev ? prev.fullAt : now,
           });
+          rememberTree(hwnd, cur);
           return text(`changed after ${waited()}ms\n` + delta);
         }
         await sleep(350);
@@ -1494,7 +1627,16 @@ const handlers = {
       const snap = await handlers.computer_snapshot({ hwnd: closeHwnd, ...(prev ? prev.args : { interactive_only: true }) });
       return (elsewhere ? `after the run (in "${r.lastTitle}", hwnd ${closeHwnd}):\n` : 'after the run:\n') + bodyOf(snap);
     };
-    const ctx = { hwnd, title: win.title, resolveWindow, review: true };
+    // An action followed by a wait for change gets a fresh "before" picture
+    // when the latest one predates an earlier action on that window, so the
+    // wait reports what this action changed rather than everything since then.
+    const beforeAction = async (h) => {
+      const tree = lastTree.get(Number(h));
+      const acted = lastActAt.get(Number(h)) || 0;
+      if (tree && !tree.partial && tree.at >= acted) return;
+      rememberTree(h, await pollTree(h, {}));
+    };
+    const ctx = { hwnd, title: win.title, resolveWindow, review: true, beforeAction };
     const opts = { stopOnError: args.stop_on_error !== false };
 
     if (background) {
@@ -1504,7 +1646,7 @@ const handlers = {
         // A background run nobody checks on for this long stops on its own.
         orphanAfterMs: 10 * 60_000,
       });
-      task.promise.finally(() => runBusy(false));
+      task.promise.finally(async () => { await runBusy(false); await giveBack(); });
       return text(sessions.note(hwnd) +
         `task ${task.id} started: ${v.expanded} step(s) on "${win.title}" (hwnd ${hwnd}). ` +
         `It runs while you do other work; check it with computer_task { id: "${task.id}" }, or computer_task { id: "${task.id}", wait_ms: 30000 } to wait for it. ` +
@@ -1513,13 +1655,15 @@ const handlers = {
 
     await runBusy(true);
     let r;
+    let back = '';
     try { r = await tasks.runSteps(v.plan, ctx, call, opts); }
-    finally { await runBusy(false); }
+    finally { await runBusy(false); back = await giveBack(); }
     let out = sessions.note(hwnd) +
       `run on "${win.title}" (hwnd ${hwnd}): ${r.ran}/${v.expanded} step(s) ran, ${r.failed ? r.failed + ' failed' : 'all ok'}` +
       (r.optionalFailed ? ` (${r.optionalFailed} optional failed)` : '') + '\n' +
       r.lines.join('\n');
     if (r.touched.size > 1) out += `\nwindows touched: ${[...r.touched].join(', ')}`;
+    if (back) out += '\n' + back.trim();
     if (args.read_after !== false) {
       try { out += '\n\n' + await after(r); }
       catch (err) { out += `\n\n(no closing read: ${err && err.message})`; }
@@ -1575,7 +1719,15 @@ const handlers = {
   // call is told what happened. This must never start the host - a session
   // that never used Computer Use would otherwise compile it on its first Stop.
   async computer_turn_ended(args) {
-    if (args.session_id) journal.identify(String(args.session_id));
+    if (args.session_id) {
+      journal.identify(String(args.session_id));
+      // A server that started without its session id learns it here, and
+      // from now on keeps this conversation's grants where a resume finds them.
+      if (!sessions.sessionId) {
+        sessions.setSessionId(String(args.session_id));
+        policy.setStore(grantsFile(args.session_id));
+      }
+    }
     const why = args.reason === 'api_error' ? 'API error' : 'Stop';
     let stopped = 0;
     if (BACKGROUND_AT_TURN_END === 'stop') stopped = tasks.stopAll(HALT_TURN);
@@ -1615,6 +1767,20 @@ const handlers = {
       : `closed "${result.closed}".`) + autoGrantNote(check));
   },
 };
+
+// The foreground an action borrowed goes back to the window the user had in
+// front (host op give_back, which decides whether it may). Called when a run
+// ends and after a single action outside a run. Returns a sentence for the
+// result, or '' when there was nothing to say.
+async function giveBack() {
+  if (activeRuns > 0 || !driver.proc) return '';
+  let r;
+  try { ({ result: r } = await driver.call('give_back', {}, { timeoutMs: 4000 })); }
+  catch { return ''; }   // an older host without the op
+  if (r && r.given_back) return ` Foreground given back to "${r.title || 'the window the user had in front'}".`;
+  if (r && r.reason === 'menu_open') return ' The window stays in front while the menu it opened is showing; the user\'s window gets the foreground back after the next action.';
+  return '';
+}
 
 // While any run is in flight the host keeps Escape armed, so a press between
 // two steps - during a sleep, say - still stops the run.
@@ -1688,7 +1854,9 @@ async function act(op, args, describe) {
     return fail('no_window', 'Could not tell which window this targets.',
       'Pass hwnd, or take a snapshot first and act on an index from it.');
   }
-  const check = policy.checkAct(win);
+  // What is about to be sent rides along, for the slash-only gate of a Claude
+  // Code terminal; every other window ignores it.
+  const check = policy.checkAct(win, { kind: op, text: args.text, keys: args.keys });
   if (!check.ok) return failCheck(check);
   const elsewhere = offDesktopCheck(win);
   if (elsewhere) return elsewhere;
@@ -1733,8 +1901,35 @@ async function act(op, args, describe) {
   // the keyboard. Reads never take the lease; everything here can end up
   // sending input, so all of it does.
   bannerStatus(`${VERB[op] || op} in ${appWord(win)}`);
-  const call = await sessions.withInput(op, { hwnd, title: win.title },
-    () => driver.call(op, payload));
+  // An index read before a React-style re-render names a node that no longer
+  // exists - the button was replaced, not changed. When the name and role that
+  // index had match exactly one element now, that element is the target.
+  let refound = null;
+  let call;
+  let acted = false;
+  try {
+    call = await sessions.withInput(op, { hwnd, title: win.title }, async () => {
+      try { return await driver.call(op, payload); }
+      catch (err) {
+        const was = err && err.code === 'element_stale' && payload.index != null && !payload.selector
+          ? (elementNames.get(hwnd) || new Map()).get(Number(payload.index)) : null;
+        if (!was || !was.name || !was.role) throw err;
+        const retry = { ...payload, selector: { name: was.name, role: was.role, unique: true } };
+        delete retry.index;
+        delete retry.snapshot_id;
+        let r2;
+        try { r2 = await driver.call(op, retry); }
+        catch { throw err; }   // no single match: the stale error is the true answer
+        refound = was;
+        return r2;
+      }
+    });
+    acted = true;
+  } finally {
+    lastActAt.set(hwnd, Date.now());
+    // A failed action may still have raised its window before failing.
+    if (!acted) await giveBack();
+  }
   const { result } = call;
   sessions.heartbeat({
     last_op: op, last_at: Date.now(),
@@ -1742,6 +1937,9 @@ async function act(op, args, describe) {
   });
 
   let out = sessions.note(hwnd) + describe(result);
+  if (refound) out += ` (index [${args.index}] had gone stale - the page replaced that element - so the one ${refound.role} "${refound.name}" there now was used.)`;
+  if (result.pattern_error) out += ` (${result.pattern_error}, so a real click was sent.)`;
+  if (result.state_unconfirmed) out += ' The state had not changed 0.7 s after the click, so the state above is unconfirmed: read the element again before relying on it.';
   out += autoGrantNote(check);
   if (named && args.confirmed === true) out += ` (confirmed consequential action: "${named}")`;
   if (call.waited_for_session_ms) {
@@ -1768,6 +1966,7 @@ async function act(op, args, describe) {
   if (before) {
     try { out += newWindowNote(await newWindowsSince(before)); } catch { /* listing is a courtesy */ }
   }
+  out += await giveBack();
   return text(out);
 }
 
@@ -1857,6 +2056,10 @@ function journalCall(name, args, result) {
 // second tool primitive: the model gets the news on whatever it calls next.
 function withNotices(result, name, args) {
   const notes = [];
+  if (restoredGrants.length) {
+    notes.push(`[restored input grants from this conversation before it was resumed: ${restoredGrants.join(', ')}]`);
+    restoredGrants = [];
+  }
   if (turnEnded) {
     const t = turnEnded;
     turnEnded = null;

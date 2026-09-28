@@ -85,6 +85,14 @@ Once it knows that, it can behave:
   or steal your focus, so most of what it does you will never feel.
 - When it genuinely needs the pointer, it waits for a gap in your typing, takes
   it, and puts the pointer back where you left it.
+- A real click activates the window it lands in, and keystrokes need their
+  window in front. When an action takes the foreground from the window you
+  were in, it hands it back as soon as that action (or the whole run) ends, so
+  what you type next goes where you meant it to. It leaves the window in front
+  while a menu or dropdown it opened is still showing (those close the moment
+  their app loses the foreground) and gives it back after the next action; it
+  does not if you have clicked somewhere yourself since, and never in `take` or
+  `exclusive` mode.
 - If you are actively typing in a window, it will not touch that window. It goes
   and does something else.
 
@@ -562,6 +570,26 @@ plugin settings. An app on that list is granted on first use instead of
 refused, and the result says so. Blocked and shell tiers stay ungrantable
 whatever the list says.
 
+### Slash commands into another Claude Code terminal (off unless you turn it on)
+
+Terminals are read-only to Computer Use. One narrow exception exists, and it is
+off by default: with **Let Claude type slash commands into other Claude Code
+terminals** set to `on` in the plugin settings (or
+`COMPUTER_USE_ALLOW_SLASH_COMMANDS=1` in Claude Code's environment), a
+terminal window whose title says "Claude Code" can be granted **slash commands
+only**. The grant is for that one window. Through it Claude can type exactly one
+line that is a Claude Code slash command - `/compact`, `/usage`,
+`/model sonnet` - and then press Enter in the same window within 20 seconds.
+Everything else is refused with `slash_only`: ordinary text, a second line, a
+paste, a click, any other key, a second Enter. Nothing a tool call can pass
+turns the setting on, the session's own terminal can never be granted, and a
+Stop press withdraws it with every other grant.
+
+The risk is the command itself. The other session obeys the slash command it is
+given, and some cannot be undone: `/clear` throws away that conversation's
+context, `/logout` signs it out. Turn this on only if you want one Claude to
+steer another, and leave it off otherwise.
+
 ## What it will not do
 
 Reading is free. Acting needs a grant, per app, for that session only.
@@ -570,7 +598,7 @@ Reading is free. Acting needs a grant, per app, for that session only.
 | --- | --- |
 | `standard` | grant and go |
 | `sensitive` | grantable, but it tells Claude what that app reaches. A browser carries every session you are signed in to. |
-| `shell` | terminals and editors. Readable, **never typeable** — anything typed there runs as you. |
+| `shell` | terminals and editors. Readable, **never typeable** — anything typed there runs as you. (The one opt-in exception: slash commands into another Claude Code terminal, above.) |
 | `blocked` | password managers, UAC prompts, login screens. **Not even readable**, because their accessibility tree has the secrets in plain text. |
 
 **It cannot answer for you at the point of no return.** Send, pay, order and
@@ -586,7 +614,10 @@ because Windows 11 Notepad runs every window inside one shared process. A PID is
 not a window. Computer Use does not get to make that mistake.
 
 Your Claude Code session is excluded from its own listings, so text on your
-screen cannot loop back into the model as if it had observed it. Add your own
+screen cannot loop back into the model as if it had observed it. That includes
+the terminal window the session is drawn in: Windows Terminal draws every
+terminal window from one process, so the window is found through the session's
+console rather than by process. Add your own
 blocked apps in the plugin settings; that list only ever grows.
 
 A few knobs live only in the environment of the Claude Code process, for
@@ -627,13 +658,16 @@ will fix it.
 ```
 node tools/test-all.mjs        every suite below
 node tools/verify.mjs           33  drives real windows end to end, cursor never moves
-node tools/policy-test.mjs     113  tiers, grants, refusals, what needs confirming, what open may hand a file to
+node tools/policy-test.mjs     150  tiers, grants, refusals, what needs confirming, what open may hand a file to, the slash-command grant
 node tools/sessions-test.mjs    48  two Claudes: slots, the input lease, dead sessions
 node tools/presence-test.mjs    32  telling you apart from Computer Use, overlay, banner
 node tools/build-test.mjs       15  compile, idempotence, concurrent builds, manifest and marketplace versions agree
 node tools/host-test.mjs        57  tree, patterns, input, crash recovery
 node tools/mcp-test.mjs         66  the protocol end to end, prints token costs
 node tools/batch-test.mjs       69  stable indices, deltas, find, waits, runs, tasks, posted input, launch
+node tools/fixes-test.mjs       21  names, landmarks, exclude, find on the printed row, max_nodes, run fields, resumed grants
+node tools/web-test.mjs         31  a web form in an InPrivate Edge window: click states, disabled and re-rendered
+                                    buttons, scrolling without the pointer, waits, the foreground coming back
 
 and one that is deliberately not in that run, because it moves your screen,
 and that runs nothing unless asked by name:

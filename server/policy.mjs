@@ -6,6 +6,7 @@
 //   2. Grant - per app, per session, and only for acting. Reading a window's
 //      tree never implies permission to click in it.
 
+import fs from 'node:fs';
 import path from 'node:path';
 
 // Never readable, never actable. Reading is blocked too, not only acting: a
@@ -339,11 +340,85 @@ export function rectsOverlap(a, b) {
       && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
 }
 
+// ---------------------------------------------------------------------------
+// Slash commands into a Claude Code terminal (opt-in, off by default)
+// ---------------------------------------------------------------------------
+//
+// A terminal is shell tier: whatever is typed there runs as the user, so
+// Computer Use never types into one. The one exception is a Claude Code
+// terminal, and only for a Claude Code slash command - /compact, /usage,
+// /model sonnet - and only when the person who installed the plugin turned it
+// on in the plugin's settings. Nothing a tool call can pass switches it on.
+//
+// What the grant allows, per window: computer_type of exactly one line that
+// is a slash command, then computer_key enter (or return) into the same
+// window within 20 seconds of it. Every other action in that window - a click,
+// a paste, ordinary text, a second enter, any other key - is refused with
+// slash_only. The risk that remains is the command itself: a Claude Code
+// session obeys the slash command it is given, and a command such as /clear
+// cannot be undone. That is why it is opt-in, and why the README says so.
+const SLASH_SETTING = /^(1|true|on|yes)$/i;
+export function slashCommandsAllowed(env = process.env) {
+  const on = (v) => SLASH_SETTING.test(String(v == null ? '' : v).trim());
+  return on(env.CU_ALLOW_SLASH_COMMANDS) || on(env.COMPUTER_USE_ALLOW_SLASH_COMMANDS);
+}
+
+export function isClaudeCodeTerminal(win) {
+  return !!win && classify(win).tier === TIER.SHELL && /claude code/i.test(String(win.title || ''));
+}
+
+// One slash command: a name, then optional arguments on the same line. No
+// control characters, so no second line can ride along.
+export const SLASH_COMMAND = /^\/[a-z][a-z0-9:_-]{0,63}(?: [^\u0000-\u001f\u007f]{1,200})?$/;
+const SLASH_ENTER_MS = 20_000;
+
 export class Policy {
-  constructor() {
+  constructor({ store = null, env = process.env } = {}) {
     // key: normalised process name -> { grantedAt, reason }
     this.grants = new Map();
     this.selfPids = new Set();
+    this.selfHwnds = new Set();
+    // Claude Code terminals granted slash commands only: hwnd -> { app, at, slashAt }.
+    // By window, never by app: one Windows Terminal process draws them all.
+    this.slashGrants = new Map();
+    this.env = env;
+    // Where this conversation's grants are kept, so a resumed conversation -
+    // same session id, new server process - still has them. null: memory only.
+    this.store = store;
+  }
+
+  // Grants saved by an earlier process of this conversation, if any. A file
+  // older than a week is not trusted and not read.
+  restore() {
+    if (!this.store) return [];
+    let saved;
+    try {
+      const st = fs.statSync(this.store);
+      if (Date.now() - st.mtimeMs > 7 * 24 * 3600_000) return [];
+      saved = JSON.parse(fs.readFileSync(this.store, 'utf8'));
+    } catch { return []; }
+    const out = [];
+    for (const g of (saved && saved.grants) || []) {
+      if (!g || !g.app || this.grants.has(g.app)) continue;
+      this.grants.set(g.app, { grantedAt: Number(g.at) || Date.now(), tier: g.tier, auto: !!g.auto, restored: true });
+      out.push(g.app);
+    }
+    return out;
+  }
+
+  setStore(file) {
+    this.store = file || null;
+    this.save();
+  }
+
+  save() {
+    if (!this.store) return;
+    try {
+      if (!this.grants.size) { fs.rmSync(this.store, { force: true }); return; }
+      const grants = [...this.grants].map(([app, v]) => ({ app, tier: v.tier, at: v.grantedAt, auto: !!v.auto }));
+      fs.mkdirSync(path.dirname(this.store), { recursive: true });
+      fs.writeFileSync(this.store, JSON.stringify({ grants }));
+    } catch { /* grants still hold in memory for this process */ }
   }
 
   // Windows belonging to this Claude Code session are excluded from listings
@@ -353,8 +428,15 @@ export class Policy {
     for (const p of pids) if (p) this.selfPids.add(Number(p));
   }
 
+  // The terminal window this session is drawn in, found through its console
+  // (see ConsoleWindowOf in the host). A window, not a process: one Windows
+  // Terminal process draws every terminal window on the desktop.
+  markSelfWindow(hwnd) {
+    if (hwnd) this.selfHwnds.add(Number(hwnd));
+  }
+
   isSelf(win) {
-    return win && this.selfPids.has(Number(win.pid));
+    return !!win && (this.selfPids.has(Number(win.pid)) || this.selfHwnds.has(Number(win.hwnd)));
   }
 
   key(win) {
@@ -367,30 +449,73 @@ export class Policy {
       return { ok: false, tier, reason };
     }
     if (tier === TIER.SHELL) {
+      if (slashCommandsAllowed(this.env) && isClaudeCodeTerminal(win) && !this.isSelf(win)) {
+        this.slashGrants.set(Number(win.hwnd), { app: this.key(win), at: Date.now(), slashAt: 0 });
+        return { ok: true, tier, slashOnly: true, reason: 'Slash commands only: one /command line typed, then enter. Nothing else is sent to this terminal.' };
+      }
       return { ok: false, tier, reason };
     }
     this.grants.set(this.key(win), { grantedAt: Date.now(), tier });
+    this.save();
     return { ok: true, tier, reason };
   }
 
   revoke(key) {
-    return this.grants.delete(normalise(key));
+    const k = normalise(key);
+    let ok = this.grants.delete(k);
+    for (const [h, g] of this.slashGrants) if (g.app === k) { this.slashGrants.delete(h); ok = true; }
+    this.save();
+    return ok;
   }
 
   revokeAll() {
-    const n = this.grants.size;
+    const n = this.grants.size + this.slashGrants.size;
     this.grants.clear();
+    this.slashGrants.clear();
+    this.save();
     return n;
   }
 
   granted(win) {
-    return this.grants.has(this.key(win));
+    return this.grants.has(this.key(win)) || (!!win && this.slashGrants.has(Number(win.hwnd)));
   }
 
   listGrants() {
     const out = [];
     for (const [k, v] of this.grants) out.push({ app: k, tier: v.tier, granted_at: new Date(v.grantedAt).toISOString() });
+    for (const [h, g] of this.slashGrants) out.push({ app: `${g.app} hwnd ${h} (slash commands only)`, tier: TIER.SHELL, granted_at: new Date(g.at).toISOString() });
     return out;
+  }
+
+  // The slash-only gate for a granted Claude Code terminal. input is
+  // { kind, text, keys }: the op about to run and what it would send.
+  checkSlash(win, input) {
+    const g = this.slashGrants.get(Number(win.hwnd));
+    const refuse = (message) => ({
+      ok: false, code: 'slash_only', message,
+      hint: 'This terminal is granted Claude Code slash commands only: computer_type one line such as "/compact", then computer_key "enter" within 20 s.',
+    });
+    // The setting may have been turned off, or the window may no longer be a
+    // Claude Code terminal (the tab closed, another program took the title).
+    if (!slashCommandsAllowed(this.env) || !isClaudeCodeTerminal(win)) {
+      this.slashGrants.delete(Number(win.hwnd));
+      return { ok: false, code: 'app_input_blocked', message: classify(win).reason, hint: 'Use the Bash tool for shell work; it is sandboxed and auditable.' };
+    }
+    const kind = input && input.kind;
+    if (kind === 'type') {
+      const t = typeof input.text === 'string' ? input.text : '';
+      if (!SLASH_COMMAND.test(t)) return refuse(`Only a single-line Claude Code slash command can be typed here, not ${JSON.stringify(t.slice(0, 60))}.`);
+      g.slashAt = Date.now();
+      return { ok: true, tier: TIER.SHELL, slashOnly: true };
+    }
+    if (kind === 'key') {
+      const k = String(input.keys || '').trim().toLowerCase();
+      if (k !== 'enter' && k !== 'return') return refuse(`Only enter, after a slash command, can be pressed here - not "${input.keys}".`);
+      if (!g.slashAt || Date.now() - g.slashAt > SLASH_ENTER_MS) return refuse('Enter is sent only within 20 s of typing a slash command into this terminal.');
+      g.slashAt = 0;   // one enter per command
+      return { ok: true, tier: TIER.SHELL, slashOnly: true };
+    }
+    return refuse(`${kind ? `"${kind}"` : 'That action'} is not a slash command.`);
   }
 
   // Pixels do not respect tiers. A capture shows whatever is drawn in the
@@ -425,16 +550,20 @@ export class Policy {
     return { ok: true, tier };
   }
 
-  // Gate for anything that sends input or closes a window.
-  checkAct(win) {
+  // Gate for anything that sends input or closes a window. input, when given,
+  // is { kind, text, keys } for the op about to run - the slash-only gate of a
+  // Claude Code terminal decides on it; every other window ignores it.
+  checkAct(win, input = null) {
     const read = this.checkRead(win);
     if (!read.ok) return read;
     const { tier, reason } = classify(win);
     if (tier === TIER.SHELL) {
+      if (win && this.slashGrants.has(Number(win.hwnd))) return this.checkSlash(win, input);
       return { ok: false, code: 'app_input_blocked', message: reason, hint: 'Use the Bash tool for shell work; it is sandboxed and auditable.' };
     }
     if (!this.granted(win) && isAlwaysAllowed(win)) {
       this.grants.set(this.key(win), { grantedAt: Date.now(), tier, auto: true });
+      this.save();
       return { ok: true, tier, autoGranted: this.key(win) };
     }
     if (!this.granted(win)) {
