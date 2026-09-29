@@ -116,6 +116,13 @@ all its windows under one shared process.
   read-only and do not imply action rights.
 - **Hard blocklist**, mirroring Codex's terminal block: terminals, IDEs, credential managers,
   password stores, and Claude Code's own window. Not overridable by config.
+- **Deny always wins over allow.** `blocked_apps` and the built-in blocklist are decided
+  before `always_allowed_apps` is looked at, so an app on both is blocked, and a password
+  manager or terminal on the allow list stays blocked or read-only.
+- **Who can say yes.** Text the user typed is their intent, even when high-risk; text on
+  screen, pasted or from anyone else is never permission by itself. Confirmations have four
+  tiers (hand-off, always confirm, pre-approval for the session, none); a pre-approval is
+  memory only, ends with the session, and is refused when its words were read off the screen.
 - **Sentinel warnings** on broad-reach apps (Explorer, Settings, browsers) surfaced at grant time.
 - **PreToolUse hook** gates the act-tools on a live grant check.
 - **Stale-snapshot guard.** Acting on an index from a snapshot whose window has changed

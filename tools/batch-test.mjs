@@ -95,7 +95,7 @@ async function main() {
   // The same ceiling lives in astra-test.mjs, where the reason for every raise
   // is written down. Two copies of one number is how a budget drifts, so this
   // one only tracks that one: raise it there, with the argument, first.
-  check('always-on schema cost stays under 3,425 tokens', schemaTokens <= 3425, String(schemaTokens));
+  check('always-on schema cost stays under 4,030 tokens', schemaTokens <= 4030, String(schemaTokens));
   const snapTool = tools.find((t) => t.name === 'computer_snapshot');
   check('snapshot schema has index, find, full', ['index', 'find', 'full'].every((k) => snapTool.inputSchema.properties[k]));
   const waitTool = tools.find((t) => t.name === 'computer_wait_for');

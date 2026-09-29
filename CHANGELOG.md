@@ -4,6 +4,52 @@ Every released version, newest first, on the tag of the same name. Dates are the
 release commit's own. Anything marked UNVERIFIED was not exercised on real
 hardware at the time it shipped.
 
+## 0.11.0 - 2026-09-28
+
+Items 1-3 of `docs/TODO-astra.md`: the parts of Codex's confirmation policy
+this plugin matched only in spirit are now code, with tests.
+
+- **Deny always wins over allow.** The order is written out in
+  `server/policy.mjs`: `blocked_apps` and the built-in blocklist, then the
+  shell tier, and only then `always_allowed_apps`. `isAlwaysAllowed` itself
+  now answers no for a blocked or shell-tier app, instead of relying on
+  `checkAct` asking in the right order. `tools/policy-test.mjs` loads the
+  policy with both lists set and checks that an app on both is blocked, and
+  that KeePass or a terminal on the allow list stays blocked or read-only.
+- **The trust rule.** `SOURCE`, `canSatisfy(source, tier)` and
+  `sourceOfWords(words, screenTexts)` in `policy.mjs`: what the user typed is
+  intent, even when high-risk; text on screen, pasted or from a third party
+  is never permission by itself. `decideConfirmation` consults it, and
+  `consequenceCheck` in `server/index.mjs` now calls `decideConfirmation`
+  for every click and file-dialog confirm instead of deciding inline. The
+  server can check one part of the rule on its own: words offered as the
+  user's that it read off the screen this session are refused. Whether words
+  were typed rather than pasted is still Claude's statement, not something
+  the server can see.
+- **A third confirmation tier: pre-approval for the session.** Four tiers now
+  (`CONFIRM`: hand-off, always confirm, pre-approval, none).
+  `computer_grant { hwnd, preapprove: "Send", user_words: "..." }` lets a
+  message-type control (Send, Post, Reply all, Upload, Invite, Like, Share)
+  be pressed in that app without `confirmed: true` until the session ends.
+  Payments, deletions, installs, access and account changes - and any label
+  that names money, a coin or any amount ("Send 0.5 BTC", "Send 50"), or
+  submits a form or application - are `always_confirm` and cannot be
+  pre-approved. The control's own label on screen does not count as the
+  user's words being read off it. The pre-approval is kept in `Sessions`,
+  in memory only, never in the
+  registration file or the grants file a resumed conversation restores; it
+  ends on close, on a different conversation's id, on `revoke`, and on Stop,
+  and a background run still stops at the control.
+  `tools/sessions-test.mjs` covers the lifetime (14 new checks),
+  `tools/policy-test.mjs` the tiers, the rule and who may pre-approve what
+  (76 new checks, 226 in all).
+- `tools/astra-test.mjs`'s always-on schema ceiling moves 3970 -> 4030 for
+  the two new `computer_grant` arguments (57 tokens), with the argument
+  written beside it.
+- UNVERIFIED: the `computer_grant` pre-approval path and the click it lets
+  through were only exercised through the pure-JS suites on Linux; no
+  Windows host ran them end to end.
+
 ## 0.10.2 - 2026-09-28
 
 An independent trust-index review (M8ven) scored 0.10.1 a C, 74/100, on two

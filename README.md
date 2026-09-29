@@ -602,7 +602,12 @@ Reading is free. Acting needs a grant, per app, for that session only.
 | `blocked` | password managers, UAC prompts, login screens. **Not even readable**, because their accessibility tree has the secrets in plain text. |
 
 **It cannot answer for you at the point of no return.** Send, pay, order and
-delete controls need an explicit confirmation, per click.
+delete controls need an explicit confirmation, per click. The one exception you
+can make: tell Claude a message-type control (Send, Post, Reply all, Upload,
+Like) may be pressed without asking for the rest of the session, and it holds
+until the session ends - never saved, never in a background run, and never on
+the strength of text that was on the screen. Payments, deletions, installs and
+access changes are asked every time, whatever you said before.
 
 **It cannot kill a process.** There is no such tool. `computer_close_window` asks one
 window to close, exactly as clicking its X does, so the app can still offer to
@@ -658,8 +663,8 @@ will fix it.
 ```
 node tools/test-all.mjs        every suite below
 node tools/verify.mjs           33  drives real windows end to end, cursor never moves
-node tools/policy-test.mjs     150  tiers, grants, refusals, what needs confirming, what open may hand a file to, the slash-command grant
-node tools/sessions-test.mjs    48  two Claudes: slots, the input lease, dead sessions
+node tools/policy-test.mjs     226  tiers, grants, refusals, deny over allow, what needs confirming and who can say yes, pre-approval, what open may hand a file to, the slash-command grant
+node tools/sessions-test.mjs    62  two Claudes: slots, the input lease, dead sessions, how long a pre-approval lasts
 node tools/presence-test.mjs    32  telling you apart from Computer Use, overlay, banner
 node tools/build-test.mjs       15  compile, idempotence, concurrent builds, manifest and marketplace versions agree
 node tools/host-test.mjs        57  tree, patterns, input, crash recovery
